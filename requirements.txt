@@ -1,0 +1,7 @@
+pandas
+numpy
+scipy
+matplotlib
+PyYAML
+ib-insync
+ib-async

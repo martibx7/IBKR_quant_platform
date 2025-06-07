@@ -19,3 +19,6 @@ dist/
 
 # Data files
 data/
+
+# Custom Ignores
+tools/*.txt

@@ -1,0 +1,67 @@
+Technical Paper: The Value Migration & VWAP Reclaim Strategy
+Abstract
+This paper outlines a long-only, day-trading strategy designed for small retail accounts (<$5,000). The strategy synthesizes the auction market theory and Market Profile concepts from Mind Over Markets with the Volume-Weighted Average Price (VWAP) as a dynamic risk management and entry tool. The core thesis is to identify days where the market is attempting to establish a new, higher value area ("value migration") and to enter a long position at a favorable price when bullish conviction is confirmed intraday by the VWAP. This approach is designed to find high-probability setups while strictly defining risk, which is suitable for capital preservation in a cash-only account.
+
+1.0 Theoretical Foundation: The Market as an Auction
+As detailed in Mind Over Markets, the market is fundamentally a two-way auction process that continuously seeks to facilitate trade. Its primary function is to advertise opportunities through price and regulate them through time. The result of this auction is the creation of "value." We can visualize and quantify this value using a Market Profile or Volume Profile.
+
+
+Point of Control (POC): The price at which the most trade occurred. This is considered the "fairest price" for the session because it was most accepted by both buyers and sellers.
+
+Value Area (VA): The price range where approximately 70% of the day's volume was transacted. This area represents the market's consensus of "fair value" for that trading day.
+
+Understanding where value was established on the previous day is the benchmark for interpreting the current day's activity.
+
+2.0 The Core Concept: Identifying Bullish Value Migration
+A market is either in balance (trading within its established value area) or out of balance (seeking to establish a new value area). Our strategy focuses on identifying when the market is out of balance to the upside, as this provides the momentum we seek for a long-only approach.
+
+This is determined through two key observations derived from the book:
+
+Opening Outside of Value: When the market opens above the previous day's Value Area, it signals that the perceptions of value have shifted overnight. This is the first sign of a potential trend day, as the market is immediately out of balance.
+
+Initiative Buying and Acceptance: An open above the prior day's value must be driven by initiative buyers—participants proactively buying at higher prices, demonstrating conviction. For this move to be valid, the market must show acceptance of these higher prices. It does this by failing to immediately return to the previous day's value area. Instead, it holds its ground and begins to build volume above the old zone, indicating that a new, higher value area may be forming.
+
+When we see the market open above the prior day's value area and then hold that ground for the initial part of the session (e.g., the first 30-60 minutes), we have a strong indication that buyers are in control and are attempting to migrate value higher.
+
+3.0 Integrating VWAP as a Dynamic Confirmation Tool
+While the previous day's POC and Value Area are static reference points, the Volume-Weighted Average Price (VWAP) provides a real-time, dynamic measure of the session's "fairest price." It is the average price of all contracts traded during the day, weighted by volume.
+
+In a strong uptrend, the VWAP line will be rising.
+Professional and institutional traders often use the VWAP as a benchmark for execution quality. In an uptrend, they are likely to view pullbacks to the VWAP as buying opportunities.
+By integrating VWAP, we can confirm the bullish thesis established by the market's relationship to the previous day's value. If the price is holding above a rising VWAP, it confirms that the average participant who has traded so far is profitable on the long side. A dip to the VWAP line represents a temporary pause in momentum and offers a high-probability, low-risk entry point.
+
+4.0 The Strategy: Rules and Parameters
+This strategy is designed for day trading stocks priced between $2 and $30 to allow for meaningful position sizes with a small account.
+
+4.1 Setup Conditions (Pre-Trade Checklist):
+
+The stock must open above the Value Area High (VAH) of the previous day.
+During the first 30 minutes of trading (the "initial balance"), the stock must not fall back into the previous day's value area. This confirms acceptance of higher prices.
+4.2 Entry Trigger:
+
+After the first 30 minutes, confirm that the stock's price is above its intraday VWAP.
+Enter a long position when the price pulls back and touches the rising VWAP line.
+4.3 Risk and Position Sizing (For a <$5000 Account):
+
+Risk per Trade: Never risk more than 2% of account capital on a single trade (e.g., $5000 * 0.02 = $100).
+Stop-Loss: Place an immediate stop-loss order slightly below a recent swing low or a few cents below the VWAP at the time of entry.
+Position Size Calculation:
+Position Size = Dollar Risk Amount / (Entry Price - Stop-Loss Price)
+Example: Risk Amount = $100. Entry at $20.10 (touching VWAP). Stop-loss at $19.90.
+Risk per share = $0.20.
+Position Size = $100 / $0.20 = 500 shares.
+4.4 Exit Rules:
+
+Exit the position at the end of the trading day, regardless of profit or loss. This adheres to the cash account rules and eliminates overnight risk.
+(Optional) A profit target can be set at a 2:1 or 3:1 reward-to-risk ratio. For the example above, a 2:1 target would be $20.50 ($0.40 above entry).
+5.0 Conclusion
+The Value Migration & VWAP Reclaim Strategy creates a systematic framework for long-only momentum trading. It is rooted in the time-tested principles of auction market theory, which help identify high-conviction directional moves, while using the modern VWAP indicator for precise, risk-defined entries. By waiting for the market to prove its intention to establish higher value and then entering on a structured pullback, this strategy allows traders with small cash accounts to participate in institutional momentum with a favorable risk-reward profile.
+
+References from "Mind Over Markets"
+*  - The Market's Auction Process
+*  - Initial Balance
+*  - Value Area and Point of Control (POC)
+*  - Initiative vs. Responsive Activity
+*  - Opening Within Value and Acceptance
+*  - Opening Outside of Value / Out of Balance
+*  - Auction Failures and Rejection

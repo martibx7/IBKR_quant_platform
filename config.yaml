@@ -1,17 +1,14 @@
 # Main configuration for the backtesting engine
 
 backtest:
-  initial_cash: 100000.0
-  # NOTE: The engine currently supports one file at a time.
-  # This will be upgraded to support date ranges and multiple symbols.
-  data_path: 'data/historical/AAT_20221230.csv'
-  symbols: ['AAT']
+  initial_cash: 3000.0
+  # The data_path is now the DIRECTORY containing all ticker CSV files.
+  data_dir: 'data/historical'
 
 strategy:
-  # The name of the strategy class to run (must match the class name in the file)
-  name: 'SimplePocCrossStrategy'
+  # The name of the strategy class to run
+  name: 'OpenDriveMomentumStrategy' # Or any other new strategy
   # Strategy-specific parameters
   parameters:
-    trade_quantity: 100
-    lookback_period: 30 # Bars to wait before trading
-    hold_period: 60     # Bars to hold a position before selling
+    trade_quantity: 100 # This will be overridden by risk-based sizing
+    risk_per_trade: 0.01

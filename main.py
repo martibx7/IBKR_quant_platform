@@ -1,22 +1,24 @@
+# main.py
+
 import yaml
 import importlib
-import pandas as pd
 from backtest.engine import BacktestEngine
 from core.ledger import BacktestLedger
 from core.fee_models import TieredIBFeeModel
-from analytics.profiles import VolumeProfiler, MarketProfiler
-from visualization.plotter import plot_price_and_profiles
+# Remove profile-specific plotting for now, as it was single-ticker focused
+# from analytics.profiles import VolumeProfiler, MarketProfiler
+# from visualization.plotter import plot_price_and_profiles
 
 def get_strategy_class(strategy_name: str):
     """Dynamically imports a strategy class from the strategies module."""
     try:
-        # Assumes the file is named after the strategy in snake_case
-        module_name = f"simple_poc_cross_strategy" # Example, could be made dynamic
+        # Convert CamelCase strategy name to snake_case for the filename
+        module_name = ''.join(['_' + i.lower() if i.isupper() else i for i in strategy_name]).lstrip('_')
         module_path = f"strategies.{module_name}"
         strategy_module = importlib.import_module(module_path)
         return getattr(strategy_module, strategy_name)
     except (ImportError, AttributeError) as e:
-        print(f"Error: Could not find strategy '{strategy_name}'. Please check the class and file name.")
+        print(f"Error: Could not find strategy '{strategy_name}'. Ensure the file is named '{module_name}.py' and the class name matches.")
         print(e)
         return None
 
@@ -37,23 +39,17 @@ def main():
 
     if not StrategyClass: return
 
-    strategy = StrategyClass(symbols=backtest_config['symbols'], ledger=ledger, **strategy_config['parameters'])
-    engine = BacktestEngine(backtest_config['data_path'], strategy)
+    # The 'symbols' list is now managed by the engine/scanner, but can be passed for context
+    strategy = StrategyClass(symbols=[], ledger=ledger, **strategy_config['parameters'])
+
+    # The engine now takes the directory path
+    engine = BacktestEngine(backtest_config['data_dir'], strategy)
     engine.run()
 
-    print("\nGenerating full session analysis plots...")
-    full_day_df = pd.read_csv(backtest_config['data_path'])
-    full_day_df['Date'] = pd.to_datetime(full_day_df['Date'])
-
-    volume_profiler = VolumeProfiler(full_day_df, tick_size=0.01)
-    market_profiler = MarketProfiler(full_day_df, tick_size=0.01)
-
-    plot_price_and_profiles(
-        bars_df=full_day_df,
-        volume_profiler=volume_profiler,
-        market_profiler=market_profiler,
-        symbol=backtest_config['symbols'][0]
-    )
+    # The post-run analysis will need to be updated for multi-asset results,
+    # so we comment out the old single-ticker plots for now.
+    # print("\nGenerating full session analysis plots...")
+    # ...
 
 if __name__ == '__main__':
     main()

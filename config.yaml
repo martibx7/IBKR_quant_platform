@@ -1,14 +1,14 @@
 # Main configuration for the backtesting engine
 
 backtest:
-  initial_cash: 3000.0
-  # The data_path is now the DIRECTORY containing all ticker CSV files.
+  initial_cash: 5000.0
   data_dir: 'data/historical'
 
 strategy:
   # The name of the strategy class to run
-  name: 'OpenDriveMomentumStrategy' # Or any other new strategy
+  name: 'ValueMigrationStrategy'
+
   # Strategy-specific parameters
   parameters:
-    trade_quantity: 100 # This will be overridden by risk-based sizing
-    risk_per_trade: 0.01
+    # Risk 1% of total equity on each trade
+    risk_per_trade_pct: 0.01

@@ -1,13 +1,10 @@
-# backtest/engine.py
-
 import os
 import pandas as pd
 from strategies.base import BaseStrategy
 from backtest.results import calculate_performance_metrics, print_performance_report, plot_equity_curve
-from analytics.indicators import calculate_vwap # Import our new function
+from analytics.indicators import calculate_vwap
 
 class BacktestEngine:
-    # ... (__init__, _load_all_data, _create_master_timeline are unchanged) ...
     def __init__(self, data_dir: str, strategy: BaseStrategy):
         self.data_dir = data_dir
         self.strategy = strategy
@@ -15,7 +12,9 @@ class BacktestEngine:
         self.master_timeline = self._create_master_timeline()
 
     def _load_all_data(self) -> dict[str, pd.DataFrame]:
-        """Loads all CSV files from the data directory into a dictionary of DataFrames."""
+        """
+        Loads all CSV files, standardizing all column names and handling dates.
+        """
         data = {}
         print(f"Loading data from: {self.data_dir}")
         for filename in os.listdir(self.data_dir):
@@ -23,48 +22,76 @@ class BacktestEngine:
                 symbol = os.path.splitext(filename)[0]
                 filepath = os.path.join(self.data_dir, filename)
                 try:
-                    df = pd.read_csv(filepath, parse_dates=['Date'])
+                    df = pd.read_csv(filepath)
+
+                    df.rename(columns={
+                        'date': 'Date',
+                        'open': 'Open',
+                        'high': 'High',
+                        'low': 'Low',
+                        'close': 'Close',
+                        'volume': 'Volume'
+                    }, inplace=True)
+
+                    df['Date'] = pd.to_datetime(df['Date'], utc=True)
+                    df.set_index('Date', inplace=True)
+
                     data[symbol] = df
-                    print(f"  - Loaded {symbol}")
+                    # print(f"  - Loaded {symbol}") # Optional: uncomment for verbose loading
                 except Exception as e:
                     print(f"  - Error loading {filename}: {e}")
         return data
 
     def _create_master_timeline(self) -> list:
-        """Creates a master index of all unique trading days across all tickers."""
+        """
+        Creates a master index of all unique trading days.
+        """
         all_dates = set()
         for df in self.all_data.values():
-            all_dates.update(df['Date'].dt.date)
+            all_dates.update(df.index.date)
         return sorted(list(all_dates))
 
-
-    def run(self):
+    def run(self, start_date, end_date):
         """
-        Runs the backtest, processing raw data into profiles and VWAP.
+        Runs the backtest for a specific date range.
         """
         if not self.all_data:
             print("No data loaded. Exiting backtest.")
             return
 
         print("\n--- Starting Portfolio Backtest ---")
+        print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
-        # Keep track of the previous day's data
-        prev_trade_date = None
+        # --- FIX IS HERE: This line was missing ---
+        # Filter the master timeline for the specified backtest range
+        backtest_timeline = [
+            date for date in self.master_timeline if start_date <= date <= end_date
+        ]
 
-        for trade_date in self.master_timeline:
+        if not backtest_timeline:
+            print("No trading days found in the specified date range.")
+            return
+
+        # Find the day before the backtest starts for the first scan
+        try:
+            first_day_master_index = self.master_timeline.index(backtest_timeline[0])
+            if first_day_master_index == 0:
+                print("Error: Backtest start date is the first day of the dataset.")
+                return
+            prev_trade_date = self.master_timeline[first_day_master_index - 1]
+        except (ValueError, IndexError):
+            print(f"Error: Could not find previous day for backtest start date.")
+            return
+
+        for trade_date in backtest_timeline:
             date_str = trade_date.strftime('%Y-%m-%d')
             print(f"\n--- Simulating Day: {date_str} ---")
 
-            if prev_trade_date is None:
-                prev_trade_date = trade_date
-                continue # Skip the first day as there's no "previous day" to analyze
-
-            # 1. SCANNING STEP (using data from prev_trade_date)
+            # ... The rest of the function continues as before ...
             historical_data = {
-                symbol: df[df['Date'].dt.date == prev_trade_date]
+                symbol: df[df.index.date == prev_trade_date]
                 for symbol, df in self.all_data.items()
             }
-            # The strategy selects which tickers to trade today
             candidate_tickers = self.strategy.scan_for_candidates(trade_date, historical_data)
 
             if not candidate_tickers:
@@ -74,31 +101,30 @@ class BacktestEngine:
 
             print(f"Today's Candidates: {candidate_tickers}")
 
-            # 2. EXECUTION STEP
             todays_market_data = {
-                symbol: df[df['Date'].dt.date == trade_date].copy().reset_index(drop=True)
+                symbol: df[df.index.date == trade_date].copy()
                 for symbol, df in self.all_data.items() if symbol in candidate_tickers
             }
+
             todays_market_data = {k: v for k, v in todays_market_data.items() if not v.empty}
             if not todays_market_data:
-                print("No data available for candidate tickers on this day.")
+                print("No market data available for any candidates today.")
                 prev_trade_date = trade_date
                 continue
 
-            # **Calculate VWAP for each candidate ticker for the day**
             for symbol in todays_market_data:
-                todays_market_data[symbol] = calculate_vwap(todays_market_data[symbol])
+                todays_market_data[symbol] = calculate_vwap(todays_market_data[symbol].reset_index()).set_index('Date')
 
-            # The strategy can run session start logic, now using pre-calculated profiles
             self.strategy.on_session_start(todays_market_data)
 
-            num_bars = len(next(iter(todays_market_data.values())))
-            for i in range(num_bars):
+            min_bars = min(len(df) for df in todays_market_data.values())
+
+            for i in range(min_bars):
                 current_bar_data = {
-                    symbol: df.iloc[i] for symbol, df in todays_market_data.items()
+                    symbol: df.iloc[i] for symbol, df in todays_market_data.items() if i < len(df)
                 }
                 session_bars = {
-                    symbol: df.iloc[:i+1] for symbol, df in todays_market_data.items()
+                    symbol: df.iloc[:i+1] for symbol, df in todays_market_data.items() if i < len(df)
                 }
 
                 market_prices = {
@@ -109,10 +135,8 @@ class BacktestEngine:
 
                 self.strategy.on_bar(current_bar_data, session_bars, market_prices)
 
-            # Update prev_trade_date for the next loop
             prev_trade_date = trade_date
 
-        # --- Generate Final Performance Report ---
         self.strategy.on_session_end()
         print("\n--- Backtest Complete ---")
         metrics = calculate_performance_metrics(self.strategy.ledger)

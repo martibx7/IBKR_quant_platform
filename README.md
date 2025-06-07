@@ -42,6 +42,8 @@ The final data is stored in the `/data/historical/` directory (which is git-igno
 
 1.  **Install Dependencies**:
     ```bash
+    python -m venv venv
+    .\venv\Scripts\activate
     pip install -r requirements.txt
     ```
 

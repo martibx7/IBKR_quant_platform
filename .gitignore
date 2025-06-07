@@ -7,6 +7,7 @@ __pycache__/
 env/
 venv/
 .venv/
+.env
 
 # IDE / Editor
 .idea/
@@ -23,3 +24,10 @@ data/
 # Custom Ignores
 tools/*.txt
 tools/data
+
+# --- OS-specific ---
+# Ignore macOS-specific files
+.DS_Store
+
+# Ignore Windows-specific files
+Thumbs.db

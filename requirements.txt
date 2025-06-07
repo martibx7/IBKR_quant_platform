@@ -5,3 +5,5 @@ matplotlib
 PyYAML
 ib-insync
 ib-async
+python-dotenv
+polygon-api-client

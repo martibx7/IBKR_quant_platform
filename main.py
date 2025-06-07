@@ -2,15 +2,13 @@
 
 import yaml
 import importlib
+import datetime # Import datetime
 from backtest.engine import BacktestEngine
 from core.ledger import BacktestLedger
 from core.fee_models import TieredIBFeeModel
-# Remove profile-specific plotting for now, as it was single-ticker focused
-# from analytics.profiles import VolumeProfiler, MarketProfiler
-# from visualization.plotter import plot_price_and_profiles
 
 def get_strategy_class(strategy_name: str):
-    """Dynamically imports a strategy class from the strategies module."""
+    # ... (this function remains the same) ...
     try:
         # Convert CamelCase strategy name to snake_case for the filename
         module_name = ''.join(['_' + i.lower() if i.isupper() else i for i in strategy_name]).lstrip('_')
@@ -33,23 +31,28 @@ def main():
     backtest_config = config['backtest']
     strategy_config = config['strategy']
 
+    # --- Prompt for backtest date range ---
+    start_date_str = input("Enter backtest start date (YYYY-MM-DD): ")
+    end_date_str = input("Enter backtest end date (YYYY-MM-DD): ")
+    try:
+        start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_date = datetime.datetime.strptime(end_date_str, '%Y-%m-%d').date()
+    except ValueError:
+        print("Invalid date format. Please use YYYY-MM-DD.")
+        return
+
     fee_model = TieredIBFeeModel()
     ledger = BacktestLedger(backtest_config['initial_cash'], fee_model)
     StrategyClass = get_strategy_class(strategy_config['name'])
 
     if not StrategyClass: return
 
-    # The 'symbols' list is now managed by the engine/scanner, but can be passed for context
     strategy = StrategyClass(symbols=[], ledger=ledger, **strategy_config['parameters'])
 
-    # The engine now takes the directory path
     engine = BacktestEngine(backtest_config['data_dir'], strategy)
-    engine.run()
 
-    # The post-run analysis will need to be updated for multi-asset results,
-    # so we comment out the old single-ticker plots for now.
-    # print("\nGenerating full session analysis plots...")
-    # ...
+    # Pass the dates to the run method
+    engine.run(start_date, end_date)
 
 if __name__ == '__main__':
     main()

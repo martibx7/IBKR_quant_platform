@@ -4,70 +4,93 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-def calculate_performance_metrics(ledger, risk_free_rate: float = 0.0):
+from core.ledger import BacktestLedger
+
+def calculate_performance_metrics(ledger: BacktestLedger) -> dict:
     """
-    Calculates and returns a dictionary of performance metrics.
+    Calculates a dictionary of performance metrics from the backtest ledger.
     """
     metrics = {}
-    trades_df = pd.DataFrame(ledger.closed_trades)
-    equity_df = pd.DataFrame(ledger.equity_curve).set_index('timestamp')
+    initial_cash = ledger.initial_cash
+    equity_df = pd.DataFrame(ledger.equity_curve)
 
-    if trades_df.empty:
-        print("No closed trades to analyze.")
-        return {}
+    # --- Return and PnL ---
+    final_equity = equity_df['equity'].iloc[-1] if not equity_df.empty else initial_cash
+    metrics['total_pnl'] = final_equity - initial_cash
+    metrics['total_return_pct'] = (metrics['total_pnl'] / initial_cash) * 100
 
-    # Profit and Loss
-    total_pnl = trades_df['pnl'].sum()
-    metrics['Total PnL'] = total_pnl
-    metrics['Total Return (%)'] = (total_pnl / ledger.initial_cash) * 100
+    # --- Broker Fees ---
+    metrics['total_fees'] = ledger.total_fees
 
-    # Trade Stats
-    winning_trades = trades_df[trades_df['pnl'] > 0]
-    losing_trades = trades_df[trades_df['pnl'] <= 0]
+    # --- Trade Stats ---
+    sells = [t for t in ledger.trade_history if t.get('order_type') == 'SELL']
+    wins = [t for t in sells if t['pnl'] > 0]
+    losses = [t for t in sells if t['pnl'] <= 0]
 
-    metrics['Win Rate (%)'] = (len(winning_trades) / len(trades_df)) * 100 if not trades_df.empty else 0
-    metrics['Profit Factor'] = winning_trades['pnl'].sum() / abs(losing_trades['pnl'].sum()) if not losing_trades.empty and winning_trades['pnl'].sum() > 0 else 0
-    metrics['Avg Win ($)'] = winning_trades['pnl'].mean() if not winning_trades.empty else 0
-    metrics['Avg Loss ($)'] = losing_trades['pnl'].mean() if not losing_trades.empty else 0
-    metrics['Risk/Reward Ratio'] = abs(metrics['Avg Win ($)'] / metrics['Avg Loss ($)']) if metrics['Avg Loss ($)'] != 0 else np.inf
+    metrics['num_trades'] = len(sells)
+    metrics['num_wins'] = len(wins)
+    metrics['num_losses'] = len(losses)
 
-    # Sharpe Ratio (assuming daily returns for simplicity)
+    metrics['win_rate_pct'] = (metrics['num_wins'] / metrics['num_trades']) * 100 if metrics['num_trades'] > 0 else 0
+
+    total_profit = sum(t['pnl'] for t in wins)
+    total_loss = abs(sum(t['pnl'] for t in losses))
+
+    metrics['profit_factor'] = total_profit / total_loss if total_loss > 0 else np.inf
+    metrics['avg_win_dollars'] = total_profit / metrics['num_wins'] if metrics['num_wins'] > 0 else 0
+    metrics['avg_loss_dollars'] = total_loss / metrics['num_losses'] if metrics['num_losses'] > 0 else 0
+    metrics['risk_reward_ratio'] = metrics['avg_win_dollars'] / metrics['avg_loss_dollars'] if metrics['avg_loss_dollars'] > 0 else np.inf
+
+    # --- Drawdown Statistics ---
     if not equity_df.empty:
-        daily_returns = equity_df['value'].resample('D').last().pct_change().dropna()
-        if len(daily_returns) > 1:
-            sharpe_ratio = (daily_returns.mean() - risk_free_rate) / daily_returns.std() * np.sqrt(252) # Annualized
-            metrics['Sharpe Ratio'] = sharpe_ratio
+        equity_df['peak'] = equity_df['equity'].cummax()
+        equity_df['drawdown_dollars'] = equity_df['equity'] - equity_df['peak']
+        equity_df['drawdown_pct'] = (equity_df['drawdown_dollars'] / equity_df['peak']) * 100
 
-    # Max Drawdown
-    if not equity_df.empty:
-        cumulative_max = equity_df['value'].cummax()
-        drawdown = (equity_df['value'] - cumulative_max) / cumulative_max
-        metrics['Max Drawdown (%)'] = drawdown.min() * 100
+        metrics['max_drawdown_dollars'] = equity_df['drawdown_dollars'].min()
+        metrics['max_drawdown_pct'] = equity_df['drawdown_pct'].min()
+    else:
+        metrics['max_drawdown_dollars'] = 0
+        metrics['max_drawdown_pct'] = 0
 
     return metrics
 
 def print_performance_report(metrics: dict):
-    """Prints a formatted report of performance metrics."""
+    """
+    Prints a formatted performance report from a metrics dictionary.
+    """
     print("\n--- Performance Report ---")
-    for key, value in metrics.items():
-        if isinstance(value, float):
-            print(f"{key:<20} {value:.2f}")
-        else:
-            print(f"{key:<20} {value}")
-    print("--------------------------")
+    print(f"Total PnL:              ${metrics.get('total_pnl', 0):.2f}")
+    print(f"Total Return (%):       {metrics.get('total_return_pct', 0):.2f}%")
+    print(f"Total Broker Fees:      ${metrics.get('total_fees', 0):.2f}")
+    print("-" * 30)
+    print(f"Total Trades:           {metrics.get('num_trades', 0)}")
+    print(f"Win Rate (%):           {metrics.get('win_rate_pct', 0):.2f}%")
+    print(f"Profit Factor:          {metrics.get('profit_factor', 0):.2f}")
+    print(f"Avg Win ($):            ${metrics.get('avg_win_dollars', 0):.2f}")
+    print(f"Avg Loss ($):           ${metrics.get('avg_loss_dollars', 0):.2f}")
+    print(f"Risk/Reward Ratio:      {metrics.get('risk_reward_ratio', 0):.2f}")
+    print("-" * 30)
+    print(f"Max Drawdown ($):       ${metrics.get('max_drawdown_dollars', 0):.2f}")
+    print(f"Max Drawdown (%):       {metrics.get('max_drawdown_pct', 0):.2f}%")
+    print("-" * 30)
 
-def plot_equity_curve(ledger):
-    """Plots the portfolio value over time."""
-    equity_df = pd.DataFrame(ledger.equity_curve)
-    if equity_df.empty:
+def plot_equity_curve(ledger: BacktestLedger):
+    """
+    Plots the equity curve over time.
+    """
+    if not ledger.equity_curve:
         print("No equity data to plot.")
         return
 
-    plt.figure(figsize=(14, 7))
-    plt.plot(equity_df['timestamp'], equity_df['value'], label='Equity Curve')
-    plt.title('Portfolio Equity Curve')
+    equity_df = pd.DataFrame(ledger.equity_curve)
+    equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
+
+    plt.figure(figsize=(12, 8))
+    plt.plot(equity_df['timestamp'], equity_df['equity'], label='Equity Curve')
+    plt.title('Portfolio Equity Over Time')
     plt.xlabel('Date')
-    plt.ylabel('Portfolio Value ($)')
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.ylabel('Equity ($)')
+    plt.grid(True)
     plt.legend()
     plt.show()

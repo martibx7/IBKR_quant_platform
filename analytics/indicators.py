@@ -20,6 +20,6 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate VWAP, handling potential division by zero
     df['VWAP'] = cumulative_tpv / cumulative_volume
     # Fill any initial NaN values (for the first bar if volume is 0)
-    df['VWAP'].fillna(method='ffill', inplace=True)
+    df['VWAP'] = df['VWAP'].ffill()
 
     return df

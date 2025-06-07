@@ -1,10 +1,14 @@
 # strategies/volume_poc_strategy.py
 
-# ... (imports)
 from strategies.base import BaseStrategy
+from analytics.profiles import VolumeProfiler
 
-# Update __init__ to accept kwargs for parameters
 class SimplePocCrossStrategy(BaseStrategy):
+    """
+    A simple strategy that enters a trade when the price crosses above the
+    Point of Control (POC) of a lookback period and holds for a fixed
+    number of bars.
+    """
     def __init__(self, symbols: list[str], ledger, **kwargs):
         super().__init__(symbols, ledger, **kwargs)
         self.open_position = None # Store details of the open trade
@@ -21,11 +25,13 @@ class SimplePocCrossStrategy(BaseStrategy):
         if self.open_position:
             bars_since_entry = len(session_bars[symbol]) - self.open_position['entry_bar_index']
             if bars_since_entry >= self.hold_period:
+                # Use current_bar.name for the timestamp
                 self.ledger.record_trade(
-                    timestamp=current_bar['Date'], symbol=symbol,
+                    timestamp=current_bar.name, symbol=symbol,
                     quantity=self.trade_quantity, price=current_bar['Close'],
                     order_type='SELL', market_prices=market_prices
                 )
+                print(f"[{current_bar.name}] Exiting position in {symbol} due to hold period.")
                 self.open_position = None
                 return # Stop processing for this bar after selling
 
@@ -33,16 +39,22 @@ class SimplePocCrossStrategy(BaseStrategy):
         if len(session_bars[symbol]) < self.lookback_period or self.open_position:
             return
 
-        profiler = VolumeProfiler(session_bars[symbol], tick_size=0.01)
+        # Use the most recent 'lookback_period' bars for the profile
+        lookback_bars = session_bars[symbol].iloc[-self.lookback_period:]
+        profiler = VolumeProfiler(lookback_bars, tick_size=0.01)
         poc = profiler.poc_price
-        if poc is None: return
+
+        if poc is None:
+            return
 
         price = current_bar['Close']
         if price > poc:
+            # Use current_bar.name for the timestamp
             self.ledger.record_trade(
-                timestamp=current_bar['Date'], symbol=symbol,
+                timestamp=current_bar.name, symbol=symbol,
                 quantity=self.trade_quantity, price=price,
                 order_type='BUY', market_prices=market_prices
             )
+            print(f"[{current_bar.name}] Entering position in {symbol} at {price:.2f}")
             # Store info about the open position
             self.open_position = {'entry_bar_index': len(session_bars[symbol])}

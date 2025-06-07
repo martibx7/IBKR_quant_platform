@@ -16,7 +16,7 @@ import pandas as pd
 DATA_DIR = 'data/historical'
 TICKERS_FILE = 'tickers.txt'
 # --- MODIFICATION 1: Increase the pause between requests ---
-PAUSE_SEC = 10 # Increased to 10 seconds to respect API pacing limits
+PAUSE_SEC = 3 # Increased to 10 seconds to respect API pacing limits
 CLIENT_ID = 1
 
 def load_tickers(file_path: str) -> List[str]:

@@ -82,7 +82,10 @@ def plot_price_and_profiles(bars_df: pd.DataFrame, volume_profiler: VolumeProfil
 
     # Main price chart
     ax0 = fig.add_subplot(gs[0])
-    ax0.plot(bars_df['Date'], bars_df['Close'], label='Close Price')
+
+    # --- FIX IS HERE: Use bars_df.index for the x-axis ---
+    ax0.plot(bars_df.index, bars_df['Close'], label='Close Price')
+
     ax0.set_title(f'{symbol} Price Action')
     ax0.set_xlabel('Time')
     ax0.set_ylabel('Price')

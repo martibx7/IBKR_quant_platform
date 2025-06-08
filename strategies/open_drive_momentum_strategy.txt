@@ -1,0 +1,72 @@
+Abstract
+This paper details a quantitative, intraday trading strategy designed to capitalize on Trend Days in liquid U.S. equities. The "Session-Aware Open-Drive Momentum Strategy" is rooted in the market-generated information principles described by James Dalton in "Mind Over Markets." It uses a confluence of three key analytical tools—Market Profile (TPO), Volume Profile, and the Volume-Weighted Average Price (VWAP)—to identify high-probability Open-Drive scenarios during the New York Regular Trading Hours. By systematically evaluating the market's acceptance of a price move outside the prior day's value area, the strategy aims to isolate and capture momentum driven by institutional activity. This paper outlines the complete methodology, including entry triggers, risk management protocols, and trade management logic.
+
+1. Introduction
+Identifying and participating in strong intraday trends is a primary objective for many short-term traders. However, many apparent breakouts fail, resulting in frustrating whipsaws. The challenge lies in distinguishing a genuine, institutionally-backed trend from temporary, unsustainable price movements.
+
+Drawing heavily from the auction market theory concepts in "Mind Over Markets," this strategy posits that the market itself generates the most reliable information. An "Open-Drive," where the market opens decisively outside the previous day's established value area, is a powerful signal of a potential structural shift in the market. However, an open is merely a signal of intent. The critical factor is whether this "initiative" buying or selling is accepted by other market participants.
+
+This strategy provides a systematic framework for gauging that acceptance. It operates exclusively within the New York Regular Trading Session (9:30 AM - 4:00 PM EST), using a multi-factor checklist to confirm the validity of a bullish Open-Drive before committing capital.
+
+2. Core Analytical Tools
+The strategy's strength comes from the confluence of signals from three distinct, session-aware analytical tools.
+
+Market Profile (TPO): The Market Profile provides the foundational context for the trade. We use the previous day's TPO structure to identify the key reference points: the Value Area High (VAH), Value Area Low (VAL), and the TPO Point of Control (POC). An open above the prior day's VAH and POC is the first condition that signals a potential change in market sentiment.
+
+Volume Profile: While the TPO profile shows where the market spent the most time, the Volume Profile shows where it traded the most volume. During the initial 30-minute opening drive (9:30 - 10:00 AM EST), we analyze the developing intraday Volume Profile. Its structure provides crucial insight into the quality of the move.
+
+Volume-Weighted Average Price (VWAP): VWAP serves as a dynamic, real-time benchmark for institutional activity. For this strategy, it acts as both a final confirmation for our entry and the primary tool for our trailing stop-loss mechanism. A price holding above VWAP is a strong indication that buyers are in control for the session.
+
+3. Strategy Logic & Execution
+The strategy is executed based on a strict set of rules, checked at specific times during the trading session. The following logic applies to a long-only implementation.
+
+A. Universe & Timeframe
+Universe: Liquid U.S. equities with high average daily volume.
+
+Timeframe: 1-minute bars.
+
+Session: New York Regular Trading Hours (9:30 AM - 4:00 PM EST).
+
+B. Pre-Market Analysis
+Before the 9:30 AM EST open, the strategy calculates the previous day's Market Profile VAH, VAL, and TPO POC. These values are stored as key reference points for the upcoming session.
+
+C. Entry Conditions (Checked once at 10:00 AM EST)
+At 10:00 AM EST, the following four conditions must be met to trigger a long entry:
+
+Open Outside Value: The 9:30 AM opening price must be above the previous day's VAH and TPO POC.
+
+Price Above VWAP: The price at 10:00 AM EST must be trading above the intraday VWAP calculated from the 9:30 AM open.
+
+POC Confirms Accumulation: The intraday Volume Profile POC for the 9:30-10:00 AM period must be located in the lower half of the period's price range (POC <= (High + Low) / 2). This confirms that volume is supporting the move, not fighting it.
+
+No Entry Yet: The strategy must not already be in a position for the given symbol on the current day.
+
+If all four conditions are true, a long position is initiated at the market price.
+
+D. Risk Management & Position Sizing
+Unit of Risk: The strategy risks a fixed 1% of total portfolio equity on each trade.
+
+Initial Stop-Loss: The initial stop-loss is placed at the low of the 9:30-10:00 AM opening drive range.
+
+Position Size Calculation:
+
+Risk per Share = Entry Price - Stop Loss Price
+
+Total Risk Amount = Total Equity * 0.01
+
+Quantity = Total Risk Amount / Risk per Share
+
+E. Trade Management & Exit Conditions
+Once a trade is entered, it is managed by the following exit rules:
+
+Hard Stop-Loss: The initial stop-loss remains in place.
+
+Trailing Stop-Loss (VWAP): After the position has been open for 30 minutes, a trailing stop is activated. If a 1-minute bar's low closes below the VWAP value from the previous bar, the position is immediately liquidated at the market.
+
+End-of-Day Exit: All open positions are automatically closed at 3:55 PM EST, five minutes before the session close, to avoid overnight risk.
+
+4. Hypothesis
+This strategy is hypothesized to generate positive expectancy by capturing alpha from strong, institutionally-driven intraday trends. The multi-factor confirmation process is designed to filter out weak or failing breakouts, increasing the probability that entered trades will participate in sustained directional moves (Trend Days), leading to an asymmetric risk/reward profile where winning trades are significantly larger than losing trades.
+
+5. Conclusion
+The Session-Aware Open-Drive Momentum Strategy is a systematic approach to discretionary trading concepts. By translating the principles of Auction Market Theory into a quantifiable ruleset, it aims to remove emotion and inconsistency from the execution process. Its strength lies not in any single indicator, but in the logical confluence of context (Market Profile), confirmation (Volume Profile), and timing (VWAP) to identify and manage high-probability trend trading opportunities.

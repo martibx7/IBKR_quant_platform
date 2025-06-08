@@ -1,125 +1,136 @@
-# strategies/open_drive_momentum_strategy.py
-
 import pandas as pd
-from strategies.base import BaseStrategy
-from analytics.profiles import VolumeProfiler
 import numpy as np
+from strategies.base import BaseStrategy
+from analytics.profiles import MarketProfiler, VolumeProfiler, get_session
+from analytics.indicators import calculate_vwap
+import pytz
 
 class OpenDriveMomentumStrategy(BaseStrategy):
     """
-    Trades on an Open-Drive signal, which indicates a potential Trend Day.
-    - An Open-Drive is identified in the first 30 minutes of the session.
-    - The open must be outside the previous day's value area.
-    - The initial move must be strong and directional.
-    - Position size is calculated to risk a fixed percentage of equity.
+    Implements the Session-Aware Open-Drive Momentum Strategy with robust risk management.
     """
     def __init__(self, symbols: list[str], ledger, **kwargs):
         super().__init__(symbols, ledger, **kwargs)
-        # --- Strategy Parameters ---
-        self.open_drive_period = kwargs.get('open_drive_period', 30) # In minutes/bars
-        self.risk_per_trade = kwargs.get('risk_per_trade', 0.01) # 1% of equity
+        self.risk_per_trade = kwargs.get('risk_per_trade', 0.01)
+        self.max_allocation_pct = kwargs.get('max_allocation_pct', 0.25) # Max 25% of equity in one trade
+        self.min_risk_per_share = kwargs.get('min_risk_per_share', 0.05) # Min 5 cents risk
 
-        # --- State Variables ---
-        self.traded_today = False
-        self.position_details = {}
+        self.entry_time_str = kwargs.get('entry_time', '10:00:00')
+        self.exit_time_str = kwargs.get('exit_time', '15:55:00')
+        self.tz_str = kwargs.get('timezone', 'America/New_York')
+
+        self.timezone = pytz.timezone(self.tz_str)
+        self.entry_time = pd.to_datetime(self.entry_time_str).time()
+        self.exit_time = pd.to_datetime(self.exit_time_str).time()
+
         self.prev_day_stats = {}
+        self.position_details = {}
+
+
+    def scan_for_candidates(self, trade_date, historical_data: dict[str, pd.DataFrame]):
+        """Calculates previous day's stats for each symbol."""
+        candidates = []
+        for symbol, df in historical_data.items():
+            if df.empty: continue
+
+            regular_session_df = df[df.index.to_series().apply(
+                lambda dt: get_session(dt.tz_convert(self.timezone)) == 'Regular'
+            )]
+            if regular_session_df.empty: continue
+
+            prev_day_m_profiler = MarketProfiler(regular_session_df, session='Regular')
+            if prev_day_m_profiler.poc_price is not None:
+                self.prev_day_stats[symbol] = {
+                    'vah': prev_day_m_profiler.vah, 'val': prev_day_m_profiler.val, 'poc': prev_day_m_profiler.poc_price
+                }
+                candidates.append(symbol)
+        return candidates
+
 
     def on_session_start(self, session_data: dict[str, pd.DataFrame]):
-        """
-        Calculate previous day's stats.
-        NOTE: This requires the backtest engine to provide previous day's data.
-        For this example, we assume `session_data` contains data for both
-        the previous and current trading day.
-        """
-        symbol = self.symbols[0]
-        full_df = session_data[symbol]
-        today_date = full_df['Date'].iloc[-1].date()
-
-        # Filter for previous day's data
-        prev_day_df = full_df[full_df['Date'].dt.date < today_date]
-
-        if not prev_day_df.empty:
-            # Calculate previous day's Value Area using the Volume Profiler
-            prev_day_profiler = VolumeProfiler(prev_day_df, tick_size=0.01)
-            if prev_day_profiler.poc_price is not None:
-                self.prev_day_stats = {
-                    'vah': prev_day_profiler.vah,
-                    'val': prev_day_profiler.val
-                }
-        # Reset state for the new day
-        self.traded_today = False
+        """Resets the state for the new day."""
         self.position_details = {}
 
 
-    def on_bar(self, current_bar_data: dict, session_bars: dict, market_prices: dict):
-        symbol = self.symbols[0]
-        current_bar = current_bar_data[symbol]
-        current_session = session_bars[symbol]
-        bar_index = len(current_session) - 1
+    def on_bar(self, current_bar_data: dict, session_bars: dict, market_prices: dict, analytics: dict):
+        """Main event loop for the strategy."""
+        for symbol in current_bar_data.keys():
+            if symbol not in session_bars or symbol not in analytics: continue
 
-        # --- 1. EXIT LOGIC (For open LONG position) ---
-        if self.position_details:
-            # Simple end-of-day exit
-            is_last_bar = bar_index == (len(self.ledger.df) - 1) # Check against the full dataframe length
-            if is_last_bar:
-                self.ledger.record_trade(
-                    timestamp=current_bar['Date'], symbol=symbol,
-                    quantity=self.position_details['quantity'], price=current_bar['Close'],
-                    order_type='SELL', market_prices=market_prices
-                )
-                self.position_details = {}
-                return
+            current_bar = current_bar_data[symbol]
+            current_bar_time = current_bar.name.tz_convert(self.timezone).time()
 
-            # Check stop loss
-            stop_loss = self.position_details['stop_loss']
-            if current_bar['Close'] <= stop_loss:
-                self.ledger.record_trade(
-                    timestamp=current_bar['Date'], symbol=symbol,
-                    quantity=self.position_details['quantity'], price=stop_loss, # Exit at stop price
-                    order_type='SELL', market_prices=market_prices
-                )
-                self.position_details = {}
-            return
+            # --- EXIT LOGIC ---
+            if symbol in self.position_details:
+                details = self.position_details[symbol]
 
-        # --- 2. ENTRY LOGIC (Long-Only) ---
-        # Only check for entry once per day, at the end of the open_drive_period
-        if self.traded_today or bar_index != (self.open_drive_period - 1) or not self.prev_day_stats:
-            return
+                if current_bar_time >= self.exit_time or current_bar['Low'] <= details['stop_loss']:
+                    exit_price = details['stop_loss'] if current_bar['Low'] <= details['stop_loss'] else current_bar['Close']
+                    self.ledger.record_trade(
+                        timestamp=current_bar.name, symbol=symbol, quantity=details['quantity'],
+                        price=exit_price, order_type='SELL', market_prices=market_prices
+                    )
+                    del self.position_details[symbol]
+                    continue
 
-        self.traded_today = True # Ensure we only try to enter once per day
+                trade_duration = current_bar.name - details['entry_time']
+                if trade_duration > pd.Timedelta(minutes=30):
+                    vwap_df = analytics[symbol]['vwap']
+                    if len(vwap_df) > 1 and current_bar['Low'] < vwap_df.iloc[-2]['vwap']:
+                        self.ledger.record_trade(
+                            timestamp=current_bar.name, symbol=symbol, quantity=details['quantity'],
+                            price=current_bar['Close'], order_type='SELL', market_prices=market_prices
+                        )
+                        del self.position_details[symbol]
+                        continue
 
-        opening_drive_bars = current_session.iloc[:self.open_drive_period]
-        open_price = opening_drive_bars.iloc[0]['Open']
-        drive_low = opening_drive_bars['Low'].min()
-        drive_high = opening_drive_bars['High'].max()
-        current_price = current_bar['Close']
+            # --- ENTRY LOGIC ---
+            if current_bar_time == self.entry_time and symbol not in self.position_details:
+                if symbol not in self.prev_day_stats: continue
 
-        # --- Check for Bullish Open-Drive ---
-        # Condition: Open is above previous day's value area and the initial drive holds near its high.
-        is_bullish_open_drive = (open_price > self.prev_day_stats.get('vah', np.inf) and
-                                 current_price > drive_high * 0.995)
+                current_session_df = session_bars[symbol]
+                prev_day = self.prev_day_stats[symbol]
+                opening_bar = current_session_df.iloc[0]
+                vwap_df = analytics[symbol]['vwap']
 
-        if is_bullish_open_drive:
-            # Condition met: Calculate position size and enter a LONG position
+                if not (opening_bar['Open'] > prev_day['vah'] and opening_bar['Open'] > prev_day['poc']): continue
+                if vwap_df.empty or not (current_bar['Close'] > vwap_df.iloc[-1]['vwap']): continue
 
-            # Risk Management
-            stop_loss_price = drive_low
-            risk_per_share = current_price - stop_loss_price
-            if risk_per_share <= 0:
-                return # Invalid risk, do not trade
+                opening_drive_bars = current_session_df.iloc[0:30]
+                od_profiler = VolumeProfiler(opening_drive_bars, session='Regular')
+                if od_profiler.poc_price is None: continue
 
-            equity = self.ledger.cash # Using cash as a proxy for equity in a cash-only account
-            risk_amount = equity * self.risk_per_trade
-            quantity = int(risk_amount / risk_per_share)
+                od_high, od_low = opening_drive_bars['High'].max(), opening_drive_bars['Low'].min()
+                if not (od_profiler.poc_price <= (od_high + od_low) / 2): continue
 
-            if quantity > 0:
-                self.ledger.record_trade(
-                    timestamp=current_bar['Date'], symbol=symbol,
-                    quantity=quantity, price=current_price,
-                    order_type='BUY', market_prices=market_prices
-                )
-                self.position_details = {
-                    'direction': 'LONG',
-                    'quantity': quantity,
-                    'stop_loss': stop_loss_price
-                }
+                entry_price = current_bar['Close']
+                stop_loss_price = od_low
+                risk_per_share = entry_price - stop_loss_price
+
+                # --- FIX 1: Ensure risk is meaningful ---
+                if risk_per_share < self.min_risk_per_share:
+                    print(f"[{current_bar.name}] SKIPPING {symbol}: Risk per share ({risk_per_share:.2f}) is below minimum ({self.min_risk_per_share}).")
+                    continue
+
+                equity = self.ledger.cash
+                risk_amount = equity * self.risk_per_trade
+                quantity = int(risk_amount / risk_per_share)
+
+                # --- FIX 2: Cap total position allocation ---
+                max_position_value = equity * self.max_allocation_pct
+                proposed_position_value = quantity * entry_price
+
+                if proposed_position_value > max_position_value:
+                    quantity = int(max_position_value / entry_price)
+                    print(f"[{current_bar.name}] SIZING {symbol}: Position size capped by max allocation. New quantity: {quantity}")
+
+                if quantity > 0:
+                    print(f"[{current_bar.name}] ENTRY CONFIRMED for {symbol} | Qty: {quantity}")
+                    trade_successful = self.ledger.record_trade(
+                        timestamp=current_bar.name, symbol=symbol, quantity=quantity,
+                        price=entry_price, order_type='BUY', market_prices=market_prices
+                    )
+                    if trade_successful:
+                        self.position_details[symbol] = {
+                            'quantity': quantity, 'stop_loss': stop_loss_price, 'entry_time': current_bar.name
+                        }

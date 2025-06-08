@@ -3,23 +3,23 @@
 import pandas as pd
 import numpy as np
 
-def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_vwap(df: pd.DataFrame, session: str = None) -> pd.DataFrame:
     """
-    Calculates the Volume-Weighted Average Price (VWAP) for an intraday DataFrame.
-    The DataFrame must have 'High', 'Low', 'Close', and 'Volume' columns.
+    Calculates the Volume Weighted Average Price (VWAP) for a given session.
     """
-    # Typical Price for each bar
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    if session:
+        df['session'] = df.index.to_series().apply(get_session)
+        df = df[df['session'] == session]
 
-    # Cumulative sum of Typical Price * Volume
-    cumulative_tpv = (typical_price * df['Volume']).cumsum()
+    if df.empty:
+        return df
 
-    # Cumulative sum of Volume
-    cumulative_volume = df['Volume'].cumsum()
+    df['typical_price'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['tp_x_volume'] = df['typical_price'] * df['Volume']
+    df['cumulative_tp_x_volume'] = df['tp_x_volume'].cumsum()
+    df['cumulative_volume'] = df['Volume'].cumsum()
+    df['vwap'] = df['cumulative_tp_x_volume'] / df['cumulative_volume']
 
-    # Calculate VWAP, handling potential division by zero
-    df['VWAP'] = cumulative_tpv / cumulative_volume
-    # Fill any initial NaN values (for the first bar if volume is 0)
-    df['VWAP'] = df['VWAP'].ffill()
+    return df.drop(columns=['typical_price', 'tp_x_volume', 'cumulative_tp_x_volume', 'cumulative_volume'])
 
     return df

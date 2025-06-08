@@ -1,14 +1,17 @@
-# Main configuration for the backtesting engine
+# config.yaml
 
 backtest:
-  initial_cash: 5000.0
+  start_date: '2024-01-22'
+  end_date: '2024-01-26'
+  initial_cash: 100000
   data_dir: 'data/historical'
+  symbols: ['PLTR'] # Focus on a single symbol for debugging
 
 strategy:
-  # The name of the strategy class to run
-  name: 'ValueMigrationStrategy'
-
-  # Strategy-specific parameters
+  name: 'DebugVisualizationStrategy'
   parameters:
-    # Risk 1% of total equity on each trade
-    risk_per_trade_pct: 0.01
+    tick_size: 0.01 # Resolution in dollars
+    timezone: 'America/New_York'
+
+fees:
+  model: 'zero'

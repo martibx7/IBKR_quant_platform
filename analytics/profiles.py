@@ -4,20 +4,37 @@ import string
 from scipy.signal import find_peaks
 from collections import defaultdict
 
+def get_session(dt):
+    """
+    Classifies a datetime object into a trading session.
+    """
+    # This assumes the datetime is already in the correct local timezone (e.g., America/New_York)
+    if dt.hour < 9 or (dt.hour == 9 and dt.minute < 30):
+        return 'Pre-Market'
+    elif dt.hour >= 16:
+        return 'After-Hours'
+    else:
+        return 'Regular'
+
 class VolumeProfiler:
     """
-    Calculates a Volume Profile from a DataFrame of market bars.
+    Calculates a Volume Profile from a DataFrame of market bars for a specific session.
     """
-    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01):
-        # --- FIX IS HERE: Add a check for an empty DataFrame ---
+    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01, session: str = None):
         if bars_df.empty:
             self.profile = pd.Series(dtype=np.float64)
             self.poc_price = None
             self.vah = None
             self.val = None
-            return # Exit immediately
+            return
 
         self.bars_df = bars_df.copy()
+        if session:
+            if not isinstance(self.bars_df.index, pd.DatetimeIndex):
+                raise TypeError("bars_df must have a DatetimeIndex to filter by session.")
+            self.bars_df['session'] = self.bars_df.index.to_series().apply(get_session)
+            self.bars_df = self.bars_df[self.bars_df['session'] == session]
+
         self.tick_size = tick_size
         self.profile = None
         self._calculate_profile_vectorized()
@@ -33,6 +50,10 @@ class VolumeProfiler:
         """
         Calculates the volume distribution efficiently using vectorized operations.
         """
+        if self.bars_df.empty:
+            self.profile = pd.Series(dtype=np.float64)
+            return
+
         min_price = self.bars_df['Low'].min()
         max_price = self.bars_df['High'].max()
 
@@ -67,10 +88,26 @@ class VolumeProfiler:
             return
 
         total_volume = self.profile.sum()
-        self.poc_price = self.profile.idxmax()
+
+        # --- FIX: Handle cases where idxmax returns a Series (multiple POCs) ---
+        poc = self.profile.idxmax()
+        if isinstance(poc, pd.Series):
+            poc = poc.iloc[0] # Just take the first one in case of a tie
+        self.poc_price = poc
+
         va_volume = total_volume * va_percentage
 
-        poc_index_pos = self.profile.index.get_loc(self.poc_price)
+        try:
+            # get_loc can also return a slice or a boolean array if the index is not unique
+            loc_result = self.profile.index.get_loc(self.poc_price)
+            if isinstance(loc_result, (slice, np.ndarray)):
+                poc_index_pos = loc_result.start # Take the first position
+            else:
+                poc_index_pos = loc_result
+        except KeyError:
+            self.vah = self.val = self.poc_price
+            return
+
         lower_bound_pos = poc_index_pos
         upper_bound_pos = poc_index_pos
         current_va_volume = self.profile.iloc[poc_index_pos]
@@ -90,10 +127,13 @@ class VolumeProfiler:
         self.vah = self.profile.index[upper_bound_pos]
 
     def get_volume_nodes(self, min_prominence_ratio: float = 0.1, min_distance_ticks: int = 10) -> tuple[np.ndarray, np.ndarray]:
-        if self.profile is None or self.profile.empty:
+        if self.profile is None or self.profile.empty or self.poc_price is None:
             return np.array([]), np.array([])
 
         poc_volume = self.profile.loc[self.poc_price]
+        if isinstance(poc_volume, pd.Series): # Handle multiple POCs
+            poc_volume = poc_volume.iloc[0]
+
         min_prominence = poc_volume * min_prominence_ratio
 
         hvn_indices, _ = find_peaks(self.profile.values, prominence=min_prominence, distance=min_distance_ticks)
@@ -109,8 +149,8 @@ class VolumeProfiler:
         return hvn_prices, np.array(lvn_prices)
 
 class MarketProfiler:
-    """Calculates a Market Profile (TPO) from a DataFrame of market bars."""
-    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01):
+    """Calculates a Market Profile (TPO) from a DataFrame of market bars for a specific session."""
+    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01, session: str = 'Regular'):
         if bars_df.empty:
             self.tpo_profile = defaultdict(list)
             self.poc_price = None
@@ -119,25 +159,33 @@ class MarketProfiler:
             return
 
         self.bars_df = bars_df.copy()
+        if not isinstance(self.bars_df.index, pd.DatetimeIndex):
+            raise TypeError("bars_df must have a DatetimeIndex to filter by session.")
+
         self.tick_size = tick_size
-        self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase) # Extended for more periods
+        self.session = session
+        self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
         self._calculate_tpo_profile()
         self._calculate_tpo_poc_and_value_area()
 
     def _calculate_tpo_profile(self):
         """Calculates the TPO profile using the DataFrame's index for time."""
         self.tpo_profile = defaultdict(list)
-        tpo_period_minutes = 30 # Standard 30-min TPO periods
+        tpo_period_minutes = 30
 
-        # Vectorized calculation of TPO letters for all bars at once
-        time_diff_minutes = (self.bars_df.index.hour * 60 + self.bars_df.index.minute) - \
-                            (self.bars_df.index[0].hour * 60 + self.bars_df.index[0].minute)
+        self.bars_df['session'] = self.bars_df.index.to_series().apply(get_session)
+        session_bars = self.bars_df[self.bars_df['session'] == self.session].copy()
+
+        if session_bars.empty:
+            return
+
+        time_diff_minutes = (session_bars.index.hour * 60 + session_bars.index.minute) - \
+                            (session_bars.index[0].hour * 60 + session_bars.index[0].minute)
         period_indices = time_diff_minutes // tpo_period_minutes
 
-        # Add TPO letters to a temporary column
-        self.bars_df['tpo_letter'] = [self.tpo_periods[i] if 0 <= i < len(self.tpo_periods) else '' for i in period_indices]
+        session_bars['tpo_letter'] = [self.tpo_periods[i] if 0 <= i < len(self.tpo_periods) else '' for i in period_indices]
 
-        for _, row in self.bars_df.iterrows():
+        for _, row in session_bars.iterrows():
             if not row['tpo_letter']: continue
 
             start_price = round(row['Low'] / self.tick_size) * self.tick_size
@@ -157,10 +205,25 @@ class MarketProfiler:
         tpo_counts.sort_index(ascending=False, inplace=True)
 
         total_tpos = tpo_counts.sum()
-        self.poc_price = tpo_counts.idxmax()
+
+        # --- FIX: Handle cases where idxmax returns a Series (multiple POCs) ---
+        poc = tpo_counts.idxmax()
+        if isinstance(poc, pd.Series):
+            poc = poc.iloc[0]
+        self.poc_price = poc
+
         va_tpos = total_tpos * va_percentage
 
-        poc_index_pos = tpo_counts.index.get_loc(self.poc_price)
+        try:
+            loc_result = tpo_counts.index.get_loc(self.poc_price)
+            if isinstance(loc_result, (slice, np.ndarray)):
+                poc_index_pos = loc_result.start
+            else:
+                poc_index_pos = loc_result
+        except KeyError:
+            self.vah = self.val = self.poc_price
+            return
+
         lower_bound_pos, upper_bound_pos = poc_index_pos, poc_index_pos
         current_va_tpos = tpo_counts.iloc[poc_index_pos]
 

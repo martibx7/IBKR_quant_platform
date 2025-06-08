@@ -1,9 +1,16 @@
 # core/fee_models.py
 
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
 
-class TieredIBFeeModel:
+class BaseFeeModel(ABC):
+    """Abstract base class for all fee models."""
+    @abstractmethod
+    def calculate_fee(self, quantity: float, price: float) -> float:
+        pass
+
+class TieredIBFeeModel(BaseFeeModel):
     """
     A tiered fee model simulating the Interactive Brokers structure.
     The fee per share decreases as the monthly trading volume increases.
@@ -17,13 +24,16 @@ class TieredIBFeeModel:
     )
 
     def __init__(self):
+        # This implementation does not properly handle MTD volume across backtest runs.
+        # It's a simplified model for demonstration.
         self._shares_mtd = defaultdict(int)
 
-    def get_order_fee(self, timestamp: datetime, quantity: float, price: float) -> float:
+    def calculate_fee(self, quantity: float, price: float) -> float:
         """
         Calculates the fee for a given order based on the tiered structure.
+        NOTE: This implementation does not use the timestamp and resets MTD volume for each run.
         """
-        key = (timestamp.year, timestamp.month)
+        key = (datetime.now().year, datetime.now().month) # Simplified key for single run
         self._shares_mtd[key] += quantity
 
         # Determine the fee rate
@@ -44,3 +54,8 @@ class TieredIBFeeModel:
         final_fee = min(fee_with_min, notional_value_cap)
 
         return final_fee
+
+class ZeroFeeModel(BaseFeeModel):
+    """A simple fee model with zero commission."""
+    def calculate_fee(self, quantity: float, price: float) -> float:
+        return 0.0

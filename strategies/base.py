@@ -22,8 +22,12 @@ class BaseStrategy:
     def on_session_start(self, session_data: dict[str, pd.DataFrame]):
         pass
 
-    def on_bar(self, current_bar_data: dict, session_bars: dict, market_prices: dict):
-        raise NotImplementedError("Strategy must implement on_bar method!")
+    def on_bar(self, current_bar_data: dict, session_bars: dict, market_prices: dict, analytics: dict = None):
+        """
+        Process a new bar of data for all symbols.
+        This method should be implemented by subclasses.
+        """
+        raise NotImplementedError("Should implement 'on_bar' in a subclass.")
 
     def on_session_end(self):
         pass

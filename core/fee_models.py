@@ -23,10 +23,14 @@ class TieredIBFeeModel(BaseFeeModel):
         (float('inf'), 0.0005)
     )
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         # This implementation does not properly handle MTD volume across backtest runs.
         # It's a simplified model for demonstration.
         self._shares_mtd = defaultdict(int)
+        self.min_trade_fee = kwargs.get('min_trade_fee', 0.35)
+        self.fee_per_share = kwargs.get('fee_per_share', 0.0035) # Default to lowest tier
+        self.max_fee_pct_of_trade = kwargs.get('max_fee_pct_of_trade', 0.01)
+
 
     def calculate_fee(self, quantity: float, price: float) -> float:
         """
@@ -47,15 +51,28 @@ class TieredIBFeeModel(BaseFeeModel):
         fee_calculated = quantity * current_tier_rate
 
         # Apply min fee
-        fee_with_min = max(0.35, fee_calculated)
+        fee_with_min = max(self.min_trade_fee, fee_calculated)
 
         # Apply max fee (1% of notional)
-        notional_value_cap = 0.01 * quantity * price
+        notional_value_cap = self.max_fee_pct_of_trade * quantity * price
         final_fee = min(fee_with_min, notional_value_cap)
 
         return final_fee
 
 class ZeroFeeModel(BaseFeeModel):
     """A simple fee model with zero commission."""
+    def __init__(self, **kwargs):
+        pass # No parameters needed
+
     def calculate_fee(self, quantity: float, price: float) -> float:
         return 0.0
+
+class FixedFeeModel(BaseFeeModel):
+    """
+    A simple fee model that charges a flat fee for every trade.
+    """
+    def __init__(self, **kwargs):
+        self.trade_fee = kwargs.get('trade_fee', 1.00)
+
+    def calculate_fee(self, quantity: float, price: float) -> float:
+        return self.trade_fee

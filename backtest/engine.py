@@ -1,169 +1,157 @@
-import os
+# backtest/engine.py
+
 import pandas as pd
-from strategies.base import BaseStrategy
-from backtest.results import calculate_performance_metrics, print_performance_report, plot_equity_curve
+from tqdm import tqdm
+from datetime import time, datetime
+import yaml
+import logging
+import os
+
+from core.ledger import BacktestLedger
 from analytics.indicators import calculate_vwap
-from analytics.profiles import get_session, VolumeProfiler, MarketProfiler
+from analytics.profiles import get_session
+from strategies.base import BaseStrategy
+from strategies.open_drive_momentum_strategy import OpenDriveMomentumStrategy
+from strategies.simple_momentum_strategy import SimpleMomentumStrategy
+from strategies.value_migration_strategy import ValueMigrationStrategy
+from strategies.volume_poc_strategy import SimplePocCrossStrategy
+from strategies.debug_visualization_strategy import DebugVisualizationStrategy
+from strategies.open_rejection_reverse_strategy import OpenRejectionReverseStrategy
+from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
+from .results import BacktestResults
+import pytz
+
+# --- Configure logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BacktestEngine:
-    def __init__(self, data_dir: str, strategy: BaseStrategy):
-        self.data_dir = data_dir
-        self.strategy = strategy
-        self.all_data = self._load_all_data()
-        self.master_timeline = self._create_master_timeline()
+    """
+    Manages the setup and execution of a backtest for a given strategy.
+    """
+    STRATEGY_MAPPING = {
+        'OpenDriveMomentumStrategy': OpenDriveMomentumStrategy,
+        'SimpleMomentumStrategy': SimpleMomentumStrategy,
+        'ValueMigrationStrategy': ValueMigrationStrategy,
+        'SimplePocCrossStrategy': SimplePocCrossStrategy,
+        'DebugVisualizationStrategy': DebugVisualizationStrategy,
+        'OpenRejectionReverseStrategy': OpenRejectionReverseStrategy,
+    }
 
-    def _load_all_data(self) -> dict[str, pd.DataFrame]:
-        """
-        Loads all CSV files, standardizing all column names and handling dates.
-        """
-        data = {}
-        print(f"Loading data from: {self.data_dir}")
-        for filename in os.listdir(self.data_dir):
-            if filename.endswith(".csv"):
-                symbol = os.path.splitext(filename)[0]
-                filepath = os.path.join(self.data_dir, filename)
-                try:
-                    df = pd.read_csv(filepath)
+    def __init__(self, config_path: str):
+        self.config = self._load_config(config_path)
+        self.strategy_name = self.config['strategy']['name']
+        self.strategy_params = self.config['strategy']['parameters'].get(self.strategy_name, {})
+        self.backtest_params = self.config['backtest']
+        self.fee_config = self.config.get('fees', {'model': 'zero'})
+        self.symbols = []
+        self.all_data = {}
+        self.ledger = BacktestLedger(
+            initial_cash=self.backtest_params['initial_cash'],
+            fee_model=self._initialize_fee_model()
+        )
+        self.strategy = None
+        self.tz_str = self.strategy_params.get('timezone', 'America/New_York')
+        self.timezone = pytz.timezone(self.tz_str)
+        self._load_all_data()
 
-                    df.rename(columns={
-                        'date': 'Date',
-                        'open': 'Open',
-                        'high': 'High',
-                        'low': 'Low',
-                        'close': 'Close',
-                        'volume': 'Volume'
-                    }, inplace=True, errors='ignore')
+    def _load_config(self, path: str):
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
 
-                    df['Date'] = pd.to_datetime(df['Date'], utc=True)
-                    df.set_index('Date', inplace=True)
+    def _initialize_fee_model(self):
+        model_name = self.fee_config.get('model', 'zero').lower()
+        if model_name == 'tiered':
+            return TieredIBFeeModel(**self.fee_config.get('tiered', {}))
+        elif model_name == 'fixed':
+            return FixedFeeModel(**self.fee_config.get('fixed', {}))
+        return ZeroFeeModel()
 
-                    data[symbol] = df
-                except Exception as e:
-                    print(f"  - Error loading {filename}: {e}")
-        return data
+    def _load_all_data(self):
+        data_dir = self.backtest_params['data_dir']
+        all_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+        for filename in tqdm(all_files, desc="Loading All Historical Data"):
+            symbol = filename.split('.csv')[0]
+            try:
+                file_path = os.path.join(data_dir, filename)
+                df = pd.read_csv(file_path)
+                df.columns = [col.strip().lower() for col in df.columns]
+                df.set_index(pd.to_datetime(df['date'], utc=True), inplace=True)
+                df.index.name = 'timestamp'
+                df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                final_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                df = df[final_cols].apply(pd.to_numeric)
+                if symbol not in self.all_data: self.all_data[symbol] = []
+                self.all_data[symbol].append(df)
+            except Exception as e:
+                print(f"ERROR processing {filename}: {e}")
 
-    def _create_master_timeline(self) -> list:
-        """
-        Creates a master index of all unique trading days.
-        """
-        all_dates = set()
-        for df in self.all_data.values():
-            all_dates.update(df.index.date)
-        return sorted(list(all_dates))
+        for symbol, df_list in self.all_data.items():
+            if df_list:
+                self.all_data[symbol] = pd.concat(df_list).sort_index()
+            else:
+                self.all_data[symbol] = pd.DataFrame()
 
-    def run(self, start_date, end_date):
-        """
-        Runs the backtest for a specific date range.
-        """
-        if not self.all_data:
-            print("No data loaded. Exiting backtest.")
-            return
+    def _get_data_for_date(self, data, target_date):
+        if data.empty: return pd.DataFrame()
+        return data.loc[data.index.date == target_date]
 
-        print(f"\n--- Starting Portfolio Backtest ---")
-        print(f"Date Range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    def run(self, trade_date: datetime):
+        self.trade_date = trade_date
 
-        backtest_timeline = [
-            date for date in self.master_timeline if start_date <= date <= end_date
-        ]
+        # --- FIX #1: Settle cash from the previous day's trades ---
+        self.ledger.settle_funds()
 
-        if not backtest_timeline:
-            print("No trading days found in the specified date range.")
-            return
+        # --- FIX #2: Safely check for empty dataframes before processing ---
+        all_available_dates = sorted(list(set(
+            d.date() for s_data in self.all_data.values()
+            if isinstance(s_data, pd.DataFrame) and not s_data.empty
+            for d in s_data.index
+        )))
 
-        try:
-            first_day_master_index = self.master_timeline.index(backtest_timeline[0])
-            if first_day_master_index == 0:
-                print("Error: Backtest start date is the first day of the dataset. Cannot get previous day's data.")
-                return
-            prev_trade_date = self.master_timeline[first_day_master_index - 1]
-        except (ValueError, IndexError):
-            print(f"Error: Could not find previous day for backtest start date.")
-            return
+        prev_day_date = next((d for d in sorted(all_available_dates, reverse=True) if d < trade_date.date()), None)
 
-        for trade_date in backtest_timeline:
-            date_str = trade_date.strftime('%Y-%m-%d')
-            print(f"\n--- Simulating Day: {date_str} ---")
+        if not prev_day_date:
+            print(f"No prior day data found for {self.trade_date.strftime('%Y-%m-%d')}. Skipping scan.")
+            return None
 
-            # Settle funds from previous day's sales at the start of the new day.
-            self.strategy.ledger.settle_funds()
-            print(f"Start of Day Settled Cash: ${self.strategy.ledger.cash:,.2f}")
+        historical_data_for_scan = {s: self._get_data_for_date(df, prev_day_date) for s, df in self.all_data.items()}
 
-            historical_data = {
-                symbol: df[df.index.date == prev_trade_date]
-                for symbol, df in self.all_data.items()
-            }
-            candidate_tickers = self.strategy.scan_for_candidates(trade_date, historical_data)
+        strategy_class = self.STRATEGY_MAPPING[self.strategy_name]
+        self.strategy = strategy_class(list(self.all_data.keys()), self.ledger, **self.strategy_params)
 
-            if not candidate_tickers:
-                print("No candidates found for today.")
-                prev_trade_date = trade_date
-                continue
+        self.symbols = self.strategy.scan_for_candidates(self.trade_date, historical_data_for_scan)
 
-            print(f"Today's Candidates: {candidate_tickers}")
+        if not self.symbols:
+            print(f"No candidates found for {self.trade_date.strftime('%Y-%m-%d')}. Skipping.")
+            return None
 
-            todays_market_data = {
-                symbol: df[df.index.date == trade_date].copy()
-                for symbol, df in self.all_data.items() if symbol in candidate_tickers
-            }
+        session_data = {s: self._get_data_for_date(self.all_data[s], self.trade_date.date()) for s in self.symbols if s in self.all_data}
+        session_data = {s: df for s, df in session_data.items() if not df.empty}
 
-            todays_market_data = {k: v for k, v in todays_market_data.items() if not v.empty}
-            if not todays_market_data:
-                print("No market data available for any candidates today.")
-                prev_trade_date = trade_date
-                continue
+        if not session_data:
+            print(f"No market data available for any candidates on {self.trade_date.strftime('%Y-%m-%d')}. Skipping.")
+            return None
 
-            self.strategy.on_session_start(todays_market_data)
+        self.strategy.on_session_start(session_data)
 
-            # Create a master timeline of all unique timestamps for the day
-            all_timestamps = set()
-            for df in todays_market_data.values():
-                all_timestamps.update(df.index)
+        all_timestamps = sorted(list(set.union(*(set(df.index) for df in session_data.values()))))
 
-            sorted_timestamps = sorted(list(all_timestamps))
+        for timestamp in all_timestamps:
+            current_bar_data = {}
+            session_bars = {}
+            market_prices = {}
+            analytics = {}
 
-            # Loop through each timestamp of the day in chronological order
-            for ts in sorted_timestamps:
-                current_bar_data = {}
-                for symbol, df in todays_market_data.items():
-                    if ts in df.index:
-                        current_bar_data[symbol] = df.loc[ts]
+            for symbol, df in session_data.items():
+                if timestamp in df.index:
+                    current_bar_data[symbol] = df.loc[timestamp]
+                    market_prices[symbol] = df.loc[timestamp]['Close']
+                    session_bars[symbol] = df.loc[df.index <= timestamp]
+                    analytics[symbol] = {'vwap': calculate_vwap(session_bars[symbol].copy())}
 
-                if not current_bar_data:
-                    continue
-
-                session_bars = {
-                    symbol: df.loc[:ts] for symbol, df in todays_market_data.items()
-                    if symbol in current_bar_data
-                }
-
-                first_symbol = next(iter(current_bar_data), None)
-                if not first_symbol: continue
-                current_session = get_session(current_bar_data[first_symbol].name.tz_convert(self.strategy.timezone))
-
-
-                analytics = {}
-                for symbol, bars in session_bars.items():
-                    session_specific_bars = bars[bars.index.to_series().apply(lambda dt: get_session(dt.tz_convert(self.strategy.timezone)) == current_session)]
-                    if not session_specific_bars.empty:
-                        analytics[symbol] = {
-                            'vwap': calculate_vwap(session_specific_bars.copy())
-                        }
-
-                market_prices = {
-                    pos: current_bar_data.get(pos, {}).get('Close', self.strategy.ledger.open_positions[pos]['entry_price'])
-                    for pos in self.strategy.ledger.open_positions
-                }
-                market_prices.update({
-                    sym: bar['Close'] for sym, bar in current_bar_data.items()
-                })
-                market_prices = {k: v for k, v in market_prices.items() if v is not None}
-
+            if current_bar_data:
                 self.strategy.on_bar(current_bar_data, session_bars, market_prices, analytics)
+                self.ledger._update_equity(timestamp, market_prices)
 
-            self.strategy.on_session_end()
-            prev_trade_date = trade_date
-
-        print("\n--- Backtest Complete ---")
-        metrics = calculate_performance_metrics(self.strategy.ledger)
-        print_performance_report(metrics)
-        plot_equity_curve(self.strategy.ledger)
+        self.strategy.on_session_end()
+        return BacktestResults(self.ledger)

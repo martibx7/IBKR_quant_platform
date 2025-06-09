@@ -12,9 +12,11 @@ strategy:
   parameters:
     OpenRejectionReverseStrategy:
       log_file: 'logs/open_rejection_reverse.log'
-      risk_per_trade: 0.01      # Risk 1% of total equity per trade
-      max_allocation_pct: 0.25  # Max 25% of equity in any single trade
-      lookback_minutes: 30      # How many minutes to wait before looking for a reversal
+      risk_per_trade_pct: 0.01      # Risk 1% of total equity per trade
+      take_profit_r: 2.5            # Take profit at 2.5x the initial risk
+      min_daily_volume: 500000      # Minimum 500k shares traded on the previous day
+      min_prev_day_range_pct: 0.03  # Previous day's range must be at least 3% to be a candidate
+      timezone: 'America/New_York'
 
     OpenDriveMomentumStrategy:
       log_file: 'logs/open_drive_momentum.log'
@@ -43,4 +45,15 @@ strategy:
       hold_period: 20
 
 fees:
-  model: 'zero'
+  # Available models: 'zero', 'fixed', 'tiered'
+  model: 'tiered'
+
+  # Settings for the 'tiered' model
+  tiered:
+    min_trade_fee: 1.00           # Minimum fee per trade
+    fee_per_share: 0.005          # Cost per share
+    max_fee_pct_of_trade: 0.005   # Fee cannot exceed 0.5% of the trade value
+
+  # Settings for the 'fixed' model
+  fixed:
+    trade_fee: 1.00 # A flat $1 per trade

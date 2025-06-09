@@ -99,6 +99,13 @@ class BacktestLedger:
         self._update_equity(timestamp, market_prices)
         return True
 
+    def get_equity_curve(self):
+        """Returns the portfolio equity curve as a pandas DataFrame."""
+        equity_df = pd.DataFrame(self.history)
+        equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
+        equity_df.set_index('timestamp', inplace=True)
+        return equity_df
+
     def get_trade_log(self):
         """Returns the list of all closed trades."""
         return self.closed_trades

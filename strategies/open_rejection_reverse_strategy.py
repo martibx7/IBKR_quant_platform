@@ -3,28 +3,50 @@
 import pandas as pd
 import numpy as np
 from strategies.base import BaseStrategy
-from analytics.profiles import get_session
+from analytics.profiles import VolumeProfiler, get_session
 import pytz
 import logging
 import os
 
 class OpenRejectionReverseStrategy(BaseStrategy):
     """
-    A long-only strategy that buys failed breakdowns at the open.
-    It identifies when the market tests lower, fails to find sellers,
-    and then reverses back through the opening price.
+    Implements a refined, multi-stage Open Rejection Reversal strategy based on
+    market-generated information principles. This is a long-only strategy.
+
+    Stage 1: The Scanner (End-of-Day)
+        - Finds stocks with significant volume and range on the prior day.
+        - Looks for a close in the upper quartile of the day's range and above the POC,
+          indicating strong closing momentum.
+
+    Stage 2: The Setup (At the Open)
+        - Confirms the candidate stock has opened above the prior day's Value Area High (VAH),
+          signaling acceptance of higher prices.
+
+    Stage 3: The Trigger (Intraday)
+        - Watches for an initial dip below the opening price.
+        - The trigger is a rally back up through the high of the opening 1-minute bar.
+
+    Stage 4: Trade Management
+        - Enters on the trigger, with a stop-loss at the low of the rejection.
+        - Position size is calculated based on a fixed percentage of equity risk.
+        - Exits at a pre-defined R-multiple profit target or at the end of the day.
     """
     def __init__(self, symbols: list[str], ledger, **kwargs):
         super().__init__(symbols, ledger, **kwargs)
-        # --- Strategy Parameters ---
-        self.position_pct_limit = kwargs.get('position_pct_limit', 0.03) # Each trade uses up to 3% of available cash
-        self.lookback_minutes = kwargs.get('lookback_minutes', 30)
+        # --- Strategy Parameters from config.yaml ---
+        self.risk_per_trade_pct = kwargs.get('risk_per_trade_pct', 0.01)
+        self.take_profit_r = kwargs.get('take_profit_r', 2.5)
+        self.min_daily_volume = kwargs.get('min_daily_volume', 500000)
+        self.min_prev_day_range_pct = kwargs.get('min_prev_day_range_pct', 0.03)
+        self.log_file = kwargs.get('log_file', 'logs/open_rejection_reverse.log')
         self.tz_str = kwargs.get('timezone', 'America/New_York')
-        self.log_file = kwargs.get('log_file', 'logs/rejection_reverse.log')
 
         # --- Strategy State ---
         self.timezone = pytz.timezone(self.tz_str)
-        self.session_state = {}
+        self.prev_day_stats = {}
+        self.active_trades = {}
+        self.disqualified_today = set()
+        self.opening_bar_info = {}
 
         self._setup_logger()
 
@@ -40,95 +62,122 @@ class OpenRejectionReverseStrategy(BaseStrategy):
         formatter = logging.Formatter('%(asctime)s - %(message)s')
         fh.setFormatter(formatter)
         self.logger.addHandler(fh)
-
-    def on_session_start(self, session_data: dict[str, pd.DataFrame]):
-        """Reset state at the start of each new day for all symbols."""
-        self.logger.info(f"--- NEW SESSION ---")
-        self.session_state = {}
-        for symbol in self.symbols:
-            # Check if the symbol exists in the provided session_data to avoid KeyError
-            if symbol in session_data and not session_data[symbol].empty:
-                self.session_state[symbol] = {
-                    'opening_price': session_data[symbol].iloc[0]['Open'],
-                    'initial_low': float('inf'),
-                    'entry_check_done': False, # Flag to ensure we only check for entry once
-                    'position_details': None
-                }
-                self.logger.info(f"  [START] {symbol} opened at {self.session_state[symbol]['opening_price']:.2f}")
-
+        self.logger.info("Strategy logger initialized.")
 
     def scan_for_candidates(self, trade_date, historical_data: dict[str, pd.DataFrame]):
-        return [s for s, df in historical_data.items() if not df.empty]
+        """Stage 1: Finds stocks that closed strong on the prior day."""
+        self.logger.info(f"--- SCANNING CANDIDATES FOR {trade_date.strftime('%Y-%m-%d')} ---")
+        candidates = []
+        for symbol, df in historical_data.items():
+            if df.empty or len(df) < 2: continue
+
+            # Filter by volume and range
+            vol = df['Volume'].sum()
+            day_high = df['High'].max()
+            day_low = df['Low'].min()
+            day_range = (day_high - day_low) / day_low if day_low > 0 else 0
+
+            if vol < self.min_daily_volume or day_range < self.min_prev_day_range_pct:
+                continue
+
+            # Check for strong close
+            profiler = VolumeProfiler(df, tick_size=0.01)
+            day_close = df.iloc[-1]['Close']
+
+            if profiler.poc_price and profiler.vah and day_close > profiler.poc_price:
+                if day_close > (day_high - 0.25 * (day_high - day_low)):
+                    self.prev_day_stats[symbol] = {'vah': profiler.vah, 'poc': profiler.poc_price}
+                    candidates.append(symbol)
+                    self.logger.info(f"  [CANDIDATE] {symbol} | Close: {day_close:.2f} > POC: {profiler.poc_price:.2f} | VAH: {profiler.vah:.2f}")
+
+        self.logger.info(f"Found {len(candidates)} candidates.")
+        return candidates
+
+    def on_session_start(self, session_data: dict[str, pd.DataFrame]):
+        """Stage 2: Check the opening price against the prior day's value area."""
+        self.logger.info(f"--- NEW SESSION ---")
+        self.active_trades.clear()
+        self.disqualified_today.clear()
+        self.opening_bar_info.clear()
+
+        for symbol, df in session_data.items():
+            if symbol in self.prev_day_stats:
+                open_price = df.iloc[0]['Open']
+                prev_vah = self.prev_day_stats[symbol]['vah']
+
+                if open_price <= prev_vah:
+                    self.disqualified_today.add(symbol)
+                    self.logger.info(f"  [DISQUALIFIED] {symbol}: Open ({open_price:.2f}) was not above prior VAH ({prev_vah:.2f}).")
+                else:
+                    self.opening_bar_info[symbol] = {
+                        'open': df.iloc[0]['Open'],
+                        'high': df.iloc[0]['High'],
+                        'low': df.iloc[0]['Low']
+                    }
+                    self.logger.info(f"  [SETUP OK] {symbol} opened at {open_price:.2f}, above prior VAH.")
 
     def on_bar(self, current_bar_data: dict, session_bars: dict, market_prices: dict, analytics: dict):
+        """Stages 3 & 4: Manages entry triggers, exits, and risk."""
         for symbol, current_bar in current_bar_data.items():
-            state = self.session_state.get(symbol)
-            if not state: continue
-
-            current_time = current_bar.name.tz_convert(self.timezone)
-
             # --- EXIT LOGIC ---
-            if symbol in self.ledger.open_positions:
-                position = self.ledger.open_positions[symbol]
-                if current_time.time() >= pd.to_datetime('15:55:00').time():
-                    self.logger.info(f"  [EXIT] EOD Exit for {symbol} at {current_bar['Close']:.2f}")
-                    self.ledger.record_trade(
-                        current_bar.name, symbol, position['quantity'],
-                        current_bar['Close'], 'SELL', market_prices
-                    )
-                elif current_bar['Low'] <= position.get('stop_loss', -1):
-                    self.logger.info(f"  [EXIT] Stop Loss for {symbol} at {position['stop_loss']:.2f}")
-                    self.ledger.record_trade(
-                        current_bar.name, symbol, position['quantity'],
-                        position['stop_loss'], 'SELL', market_prices
-                    )
+            if symbol in self.active_trades:
+                trade = self.active_trades[symbol]
+                if current_bar.name.time() >= pd.to_datetime('15:55:00').time():
+                    self.logger.info(f"  [EXIT] EOD for {symbol} at {current_bar['Close']:.2f}")
+                    self.ledger.record_trade(current_bar.name, symbol, trade['quantity'], current_bar['Close'], 'SELL', market_prices)
+                    del self.active_trades[symbol]
+                elif current_bar['Low'] <= trade['stop_loss']:
+                    self.logger.info(f"  [EXIT] Stop Loss for {symbol} at {trade['stop_loss']:.2f}")
+                    self.ledger.record_trade(current_bar.name, symbol, trade['quantity'], trade['stop_loss'], 'SELL', market_prices)
+                    del self.active_trades[symbol]
+                elif current_bar['High'] >= trade['take_profit']:
+                    self.logger.info(f"  [EXIT] Take Profit for {symbol} at {trade['take_profit']:.2f}")
+                    self.ledger.record_trade(current_bar.name, symbol, trade['quantity'], trade['take_profit'], 'SELL', market_prices)
+                    del self.active_trades[symbol]
                 continue
 
             # --- ENTRY LOGIC ---
-            if get_session(current_time) != 'Regular' or state['entry_check_done']:
+            if symbol in self.disqualified_today or symbol not in self.opening_bar_info:
                 continue
 
-            # Update the initial low during the lookback period
-            if state['opening_price'] is not None:
-                state['initial_low'] = min(state['initial_low'], current_bar['Low'])
+            # Stage 3: The Trigger
+            opening_info = self.opening_bar_info[symbol]
+            has_dipped = session_bars[symbol]['Low'].min() < opening_info['open']
 
-            lookback_end_time = (current_time.normalize() + pd.Timedelta(hours=9, minutes=30) + pd.Timedelta(minutes=self.lookback_minutes)).tz_convert(self.timezone)
+            if has_dipped and current_bar['Close'] > opening_info['high']:
+                entry_price = opening_info['high']
+                rejection_low = session_bars[symbol]['Low'].min()
 
-            # Check for entry trigger only once, right after the lookback period
-            if current_time > lookback_end_time:
-                state['entry_check_done'] = True # Mark check as done for the rest of the day
+                # --- Stage 4: Execution & Risk Management ---
+                risk_per_share = entry_price - rejection_low
+                if risk_per_share <= 0:
+                    self.disqualified_today.add(symbol) # Prevent further attempts
+                    continue
 
-                opening_price = state['opening_price']
-                initial_low = state['initial_low']
+                equity = self.ledger.cash
+                risk_amount = equity * self.risk_per_trade_pct
+                quantity = int(risk_amount / risk_per_share)
 
-                trigger_condition = (initial_low < opening_price) and (current_bar['Close'] > opening_price)
+                if quantity == 0:
+                    self.disqualified_today.add(symbol) # Prevent further attempts
+                    continue
 
-                if trigger_condition:
-                    self.logger.info(f">>> FAILED AUCTION TRIGGER for {symbol} at {current_time.time()} <<<")
-                    self.logger.info(f"  [COND] Initial Low ({initial_low:.2f}) < Open ({opening_price:.2f}).")
-                    self.logger.info(f"  [COND] Current Price ({current_bar['Close']:.2f}) > Open ({opening_price:.2f}).")
+                self.logger.info(f">>> TRIGGER for {symbol} at {current_bar.name.time()} <<<")
+                self.logger.info(f"  [COND] Dipped below open and rallied above opening bar high.")
+                self.logger.info(f"  [EXECUTE] Entering LONG {symbol} | Qty: {quantity} @ {entry_price:.2f}")
 
-                    entry_price = current_bar['Close']
-                    stop_loss_price = initial_low
+                trade_successful = self.ledger.record_trade(
+                    current_bar.name, symbol, quantity, entry_price, 'BUY', market_prices
+                )
 
-                    if (entry_price - stop_loss_price) <= 0:
-                        self.logger.warning(f"  [SKIP] {symbol}: Invalid risk (entry <= stop).")
-                        continue
+                if trade_successful:
+                    stop_loss_price = rejection_low
+                    take_profit_price = entry_price + (risk_per_share * self.take_profit_r)
+                    self.active_trades[symbol] = {
+                        'quantity': quantity,
+                        'stop_loss': stop_loss_price,
+                        'take_profit': take_profit_price
+                    }
 
-                    # --- NEW BET SIZING ---
-                    available_cash = self.ledger.cash
-                    position_value = available_cash * self.position_pct_limit
-                    quantity = int(position_value / entry_price)
-
-                    if quantity > 0:
-                        self.logger.info(f"  [EXECUTE] Entering LONG {symbol} | Qty: {quantity} @ {entry_price:.2f} | Max Cost: ${position_value:,.2f}")
-                        trade_successful = self.ledger.record_trade(
-                            timestamp=current_bar.name, symbol=symbol, quantity=quantity,
-                            price=entry_price, order_type='BUY', market_prices=market_prices
-                        )
-                        if trade_successful:
-                            # Add stop loss to the official ledger position
-                            self.ledger.open_positions[symbol]['stop_loss'] = stop_loss_price
-                    else:
-                        self.logger.info(f"  [SKIP] {symbol}: Calculated quantity is zero.")
-
+                # Disqualify from further trades today to avoid re-entry
+                self.disqualified_today.add(symbol)

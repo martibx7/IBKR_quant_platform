@@ -12,14 +12,13 @@ load_dotenv()
 API_KEY = os.environ.get("POLYGON_API_KEY")
 TICKERS_FILE = 'tickers.txt'
 DATA_DIR = 'data/historical_polygon'
-# Polygon's free tier allows 5 requests per minute, so we must pause at least 12 seconds.
-PAUSE_SEC = 13
+PAUSE_SEC = 13      # Pause to respect the 5 requests/minute free tier limit
+API_LIMIT = 50000   # Max results per Polygon API call
 
 def load_tickers(file_path: str) -> list[str]:
     """Loads a list of tickers from a text file."""
     try:
         with open(file_path, 'r') as f:
-            # .strip() removes whitespace, .upper() standardizes to uppercase
             tickers = [line.strip().upper() for line in f if line.strip()]
         if not tickers:
             print(f"Warning: Tickers file at {file_path} is empty.")
@@ -30,8 +29,8 @@ def load_tickers(file_path: str) -> list[str]:
 
 def download_polygon_data(api_key: str, tickers: list, start_date_str: str, end_date_str: str, data_dir: str):
     """
-    Downloads 1-minute historical data for a list of tickers from Polygon.io
-    and saves it into CSV files, respecting free-tier rate limits.
+    Downloads 1-minute historical data for a list of tickers from Polygon.io,
+    handling API pagination to retrieve the full date range.
     """
     if not api_key or "YOUR_API_KEY" in api_key:
         print("ERROR: POLYGON_API_KEY not found. Please set it in your .env file.")
@@ -40,56 +39,83 @@ def download_polygon_data(api_key: str, tickers: list, start_date_str: str, end_
     client = RESTClient(api_key)
     os.makedirs(data_dir, exist_ok=True)
 
-    print(f"Starting download for {len(tickers)} tickers...")
+    print(f"Starting download for {len(tickers)} tickers from {start_date_str} to {end_date_str}...")
 
     for i, ticker in enumerate(tickers):
         print(f"\n({i+1}/{len(tickers)}) Processing ticker: {ticker}")
 
-        try:
-            aggs = client.get_aggs(
-                ticker=ticker,
-                multiplier=1,
-                timespan="minute",
-                from_=start_date_str,
-                to=end_date_str,
-                adjusted=True,
-                limit=50000
-            )
+        all_aggs_df = pd.DataFrame()
+        # Use the provided start_date_str for the first iteration
+        current_start_date = start_date_str
 
-            if not aggs:
-                print(f"  - No data found for {ticker} in the specified date range.")
-                continue
+        while True:
+            # Fetch a chunk of data
+            print(f"  - Fetching data for {ticker} from {current_start_date} to {end_date_str}...")
 
-            # The client returns a list of objects with attributes like .timestamp, .open, etc.
-            # We can convert this directly to a DataFrame.
-            df = pd.DataFrame(aggs)
+            try:
+                aggs = client.get_aggs(
+                    ticker=ticker,
+                    multiplier=1,
+                    timespan="minute",
+                    from_=current_start_date,
+                    to=end_date_str,
+                    adjusted=True,
+                    limit=API_LIMIT
+                )
 
-            # --- FIX IS HERE ---
-            # 1. The timestamp field is named 'timestamp', not 't'.
-            df['date'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                if not aggs:
+                    print(f"  - No more data found for {ticker} in this range. Download for this ticker is complete.")
+                    break
 
-            # 2. The other column names are already correct (open, high, low, close, volume),
-            #    so the rename step is no longer needed.
+                chunk_df = pd.DataFrame(aggs)
+                all_aggs_df = pd.concat([all_aggs_df, chunk_df])
 
-            # Select and reorder columns to our desired format
-            df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
+                # Check if we've hit the API limit, indicating more data may be available
+                if len(chunk_df) < API_LIMIT:
+                    print(f"  - Received {len(chunk_df)} bars. This is the final chunk.")
+                    break
+                else:
+                    # We hit the limit, so we need to paginate.
+                    # The next request will start AFTER the last timestamp we received.
+                    last_timestamp_ms = chunk_df.iloc[-1]['timestamp']
+
+                    # To avoid re-requesting the same last bar, we add one minute (60000 ms)
+                    next_timestamp_ms = last_timestamp_ms + 60000
+                    current_start_date = pd.to_datetime(next_timestamp_ms, unit='ms').strftime('%Y-%m-%d')
+
+                    print(f"  - Hit API limit of {API_LIMIT} bars. Will fetch next chunk.")
+                    print(f"  - Pausing for {PAUSE_SEC} seconds to respect API rate limit...")
+                    time.sleep(PAUSE_SEC)
+
+
+            except Exception as e:
+                print(f"  - An error occurred for {ticker}: {e}")
+                # Break the loop for this ticker on error to avoid infinite loops
+                break
+
+        # After the loop, process the complete DataFrame
+        if not all_aggs_df.empty:
+            # Drop duplicates that might occur at chunk boundaries
+            all_aggs_df.drop_duplicates(subset=['timestamp'], keep='first', inplace=True)
+
+            # Convert timestamp and format the dataframe
+            all_aggs_df['date'] = pd.to_datetime(all_aggs_df['timestamp'], unit='ms', utc=True)
+            all_aggs_df = all_aggs_df[['date', 'open', 'high', 'low', 'close', 'volume']]
+            all_aggs_df.sort_values(by='date', inplace=True)
 
             filepath = os.path.join(data_dir, f'{ticker}.csv')
-            df.to_csv(filepath, index=False)
-            print(f"  - Successfully saved data for {ticker} to {filepath}")
+            all_aggs_df.to_csv(filepath, index=False)
+            print(f"  - Successfully saved {len(all_aggs_df)} total bars for {ticker} to {filepath}")
+        else:
+            print(f"  - No data was saved for {ticker}.")
 
-        except KeyError as e:
-            # Add a specific error message for this common issue
-            print(f"  - A KeyError occurred for {ticker}: {e}. This may be due to an unexpected response format from the API.")
-        except Exception as e:
-            print(f"  - An error occurred for {ticker}: {e}")
-
-        # Pause to respect the API rate limit
+        # Pause between different tickers as well
         if i < len(tickers) - 1:
-            print(f"  - Pausing for {PAUSE_SEC} seconds to respect API rate limit...")
+            print(f"  - Pausing for {PAUSE_SEC} seconds before next ticker...")
             time.sleep(PAUSE_SEC)
 
-    print("\nData download complete.")
+
+    print("\n\nData download process complete.")
 
 def main():
     """
@@ -102,7 +128,6 @@ def main():
     start_date_str = input("Enter start date (YYYY-MM-DD): ")
     end_date_str = input("Enter end date (YYYY-MM-DD): ")
 
-    # Basic validation for date format
     try:
         datetime.datetime.strptime(start_date_str, '%Y-%m-%d')
         datetime.datetime.strptime(end_date_str, '%Y-%m-%d')

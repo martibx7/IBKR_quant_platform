@@ -32,7 +32,7 @@ class BacktestEngine:
                         'low': 'Low',
                         'close': 'Close',
                         'volume': 'Volume'
-                    }, inplace=True)
+                    }, inplace=True, errors='ignore')
 
                     df['Date'] = pd.to_datetime(df['Date'], utc=True)
                     df.set_index('Date', inplace=True)
@@ -73,7 +73,7 @@ class BacktestEngine:
         try:
             first_day_master_index = self.master_timeline.index(backtest_timeline[0])
             if first_day_master_index == 0:
-                print("Error: Backtest start date is the first day of the dataset.")
+                print("Error: Backtest start date is the first day of the dataset. Cannot get previous day's data.")
                 return
             prev_trade_date = self.master_timeline[first_day_master_index - 1]
         except (ValueError, IndexError):
@@ -83,6 +83,10 @@ class BacktestEngine:
         for trade_date in backtest_timeline:
             date_str = trade_date.strftime('%Y-%m-%d')
             print(f"\n--- Simulating Day: {date_str} ---")
+
+            # Settle funds from previous day's sales at the start of the new day.
+            self.strategy.ledger.settle_funds()
+            print(f"Start of Day Settled Cash: ${self.strategy.ledger.cash:,.2f}")
 
             historical_data = {
                 symbol: df[df.index.date == prev_trade_date]
@@ -110,41 +114,55 @@ class BacktestEngine:
 
             self.strategy.on_session_start(todays_market_data)
 
-            min_bars = min(len(df) for df in todays_market_data.values())
+            # Create a master timeline of all unique timestamps for the day
+            all_timestamps = set()
+            for df in todays_market_data.values():
+                all_timestamps.update(df.index)
 
-            for i in range(min_bars):
-                current_bar_data = {
-                    symbol: df.iloc[i] for symbol, df in todays_market_data.items() if i < len(df)
-                }
+            sorted_timestamps = sorted(list(all_timestamps))
+
+            # Loop through each timestamp of the day in chronological order
+            for ts in sorted_timestamps:
+                current_bar_data = {}
+                for symbol, df in todays_market_data.items():
+                    if ts in df.index:
+                        current_bar_data[symbol] = df.loc[ts]
+
+                if not current_bar_data:
+                    continue
+
                 session_bars = {
-                    symbol: df.iloc[:i+1] for symbol, df in todays_market_data.items() if i < len(df)
+                    symbol: df.loc[:ts] for symbol, df in todays_market_data.items()
+                    if symbol in current_bar_data
                 }
 
-                first_symbol = next(iter(current_bar_data))
+                first_symbol = next(iter(current_bar_data), None)
                 if not first_symbol: continue
-                current_session = get_session(current_bar_data[first_symbol].name)
+                current_session = get_session(current_bar_data[first_symbol].name.tz_convert(self.strategy.timezone))
+
 
                 analytics = {}
                 for symbol, bars in session_bars.items():
-                    session_specific_bars = bars[bars.index.to_series().apply(get_session) == current_session]
+                    session_specific_bars = bars[bars.index.to_series().apply(lambda dt: get_session(dt.tz_convert(self.strategy.timezone)) == current_session)]
                     if not session_specific_bars.empty:
                         analytics[symbol] = {
-                            'vwap': calculate_vwap(session_specific_bars.copy()),
-                            'volume_profile': VolumeProfiler(session_specific_bars.copy()),
-                            'market_profile': MarketProfiler(session_specific_bars.copy())
+                            'vwap': calculate_vwap(session_specific_bars.copy())
                         }
 
                 market_prices = {
-                    pos: current_bar_data.get(pos, {}).get('Close')
+                    pos: current_bar_data.get(pos, {}).get('Close', self.strategy.ledger.open_positions[pos]['entry_price'])
                     for pos in self.strategy.ledger.open_positions
                 }
+                market_prices.update({
+                    sym: bar['Close'] for sym, bar in current_bar_data.items()
+                })
                 market_prices = {k: v for k, v in market_prices.items() if v is not None}
 
                 self.strategy.on_bar(current_bar_data, session_bars, market_prices, analytics)
 
+            self.strategy.on_session_end()
             prev_trade_date = trade_date
 
-        self.strategy.on_session_end()
         print("\n--- Backtest Complete ---")
         metrics = calculate_performance_metrics(self.strategy.ledger)
         print_performance_report(metrics)

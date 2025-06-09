@@ -1,20 +1,18 @@
 import os
-import re # Import the regular expression module
+import re
 import yaml
 import importlib
 from datetime import datetime
 from backtest.engine import BacktestEngine
 from core.ledger import BacktestLedger
-from core.fee_models import TieredIBFeeModel, ZeroFeeModel # Import fee models directly
+from core.fee_models import TieredIBFeeModel, ZeroFeeModel
 
 def get_strategy_class(strategy_name: str):
     """
     Dynamically imports a strategy class from the strategies directory.
     """
-    # --- FIX: Convert CamelCase to snake_case for the filename ---
     module_name = re.sub(r'(?<!^)(?=[A-Z])', '_', strategy_name).lower()
     module_path = f"strategies.{module_name}"
-
     try:
         StrategyModule = importlib.import_module(module_path)
         StrategyClass = getattr(StrategyModule, strategy_name)
@@ -22,6 +20,9 @@ def get_strategy_class(strategy_name: str):
     except ImportError as e:
         print(f"Error importing strategy: Could not find module at {module_path}.py")
         raise e
+    except AttributeError:
+        print(f"Error: Class '{strategy_name}' not found in module '{module_path}'.")
+        raise
 
 def get_fee_model_instance(fee_model_name: str):
     """
@@ -51,8 +52,8 @@ def main():
     fee_config = config['fees']
 
     # --- User Input for Dates ---
-    start_date_str = input(f"Enter backtest start date (YYYY-MM-DD) [default: {backtest_config['start_date']}]: ") or backtest_config['start_date']
-    end_date_str = input(f"Enter backtest end date (YYYY-MM-DD) [default: {backtest_config['end_date']}]: ") or backtest_config['end_date']
+    start_date_str = input("Enter backtest start date (YYYY-MM-DD): ")
+    end_date_str = input("Enter backtest end date (YYYY-MM-DD): ")
 
     try:
         start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
@@ -64,20 +65,33 @@ def main():
     # --- Setup ---
     fee_model = get_fee_model_instance(fee_config['model'])
     ledger = BacktestLedger(backtest_config['initial_cash'], fee_model)
-    StrategyClass = get_strategy_class(strategy_config['name'])
 
-    symbols = backtest_config.get('symbols')
-    if not symbols:
-        try:
-            symbols = [f.split('.')[0] for f in os.listdir(backtest_config['data_dir']) if f.endswith('.csv')]
-        except FileNotFoundError:
-            print(f"ERROR: Data directory not found at '{backtest_config['data_dir']}'")
-            return
+    # --- Load Strategy based on config ---
+    active_strategy_name = strategy_config['name']
+    print(f"\nActive Strategy: {active_strategy_name}")
 
-    strategy = StrategyClass(symbols=symbols, **strategy_config.get('parameters', {}), ledger=ledger)
+    try:
+        strategy_params = strategy_config['parameters'][active_strategy_name]
+    except KeyError:
+        print(f"ERROR: Parameters for strategy '{active_strategy_name}' not found in config.yaml under strategy.parameters.")
+        return
+
+    StrategyClass = get_strategy_class(active_strategy_name)
+
+    # --- Discover Symbols from Data Directory ---
+    try:
+        data_dir = backtest_config['data_dir']
+        symbols = [f.split('.')[0] for f in os.listdir(data_dir) if f.endswith('.csv')]
+        if not symbols:
+            print(f"Warning: No CSV files found in the data directory: '{data_dir}'")
+    except FileNotFoundError:
+        print(f"ERROR: Data directory not found at '{data_dir}'")
+        return
+
+    strategy = StrategyClass(symbols=symbols, **strategy_params, ledger=ledger)
 
     # --- Run Backtest ---
-    engine = BacktestEngine(backtest_config['data_dir'], strategy)
+    engine = BacktestEngine(data_dir, strategy)
     engine.run(start_date, end_date)
 
 

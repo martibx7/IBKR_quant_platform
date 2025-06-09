@@ -1,17 +1,46 @@
 # config.yaml
 
 backtest:
-  start_date: '2024-01-22'
-  end_date: '2024-01-26'
   initial_cash: 100000
   data_dir: 'data/historical'
-  symbols: ['PLTR'] # Focus on a single symbol for debugging
 
 strategy:
-  name: 'DebugVisualizationStrategy'
+  # Set the active strategy here.
+  name: 'OpenRejectionReverseStrategy'
+
+  # --- All strategy parameters are defined below ---
   parameters:
-    tick_size: 0.01 # Resolution in dollars
-    timezone: 'America/New_York'
+    OpenRejectionReverseStrategy:
+      log_file: 'logs/open_rejection_reverse.log'
+      risk_per_trade: 0.01      # Risk 1% of total equity per trade
+      max_allocation_pct: 0.25  # Max 25% of equity in any single trade
+      lookback_minutes: 30      # How many minutes to wait before looking for a reversal
+
+    OpenDriveMomentumStrategy:
+      log_file: 'logs/open_drive_momentum.log'
+      risk_per_trade: 0.01
+      max_allocation_pct: 0.25
+      min_risk_per_share: 0.05
+      entry_time: '10:00:00'
+      exit_time: '15:55:00'
+      timezone: 'America/New_York'
+
+    DebugVisualizationStrategy:
+      tick_size: 0.01
+      timezone: 'America/New_York'
+
+    SimpleMomentumStrategy:
+      daily_change_threshold: 0.10
+      position_size_pct: 0.01
+      r_unit_pct: 0.02
+
+    ValueMigrationStrategy:
+      risk_per_trade_pct: 0.01
+
+    SimplePocCrossStrategy:
+      trade_quantity: 100
+      lookback_period: 15
+      hold_period: 20
 
 fees:
   model: 'zero'

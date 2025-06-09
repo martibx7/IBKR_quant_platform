@@ -1,0 +1,85 @@
+Trading Bot Operational Summary: Open Rejection Reversal Strategy
+This document outlines the step-by-step logic the trading bot currently uses to identify, execute, and manage trades. The entire process is designed to find stocks with strong bullish momentum, wait for a specific intraday confirmation pattern, and then enter a long position with a clearly defined risk.
+
+The bot's operational flow is divided into three distinct phases for each trading day:
+
+Phase 1: Pre-Market Preparation (The Scan)
+
+Phase 2: Market Open (The Setup)
+
+Phase 3: Live Session (The Trigger & Trade Management)
+
+Phase 1: Pre-Market Preparation (The Scan)
+When: This phase runs once per day before the market opens (e.g., at 9:00 AM EST).
+
+Goal: To filter the entire universe of stocks down to a small, manageable watchlist of high-potential candidates for the upcoming session.
+
+How it Works:
+The bot analyzes the complete trading data from the previous trading day (e.g., on Monday morning, it analyzes Friday's data). For a stock to become a "candidate," it must meet all of the following criteria:
+
+Liquidity Filter: The stock must have traded a minimum of 500,000 shares. This ensures we only consider stocks with sufficient market interest.
+
+Volatility Filter: The day's range (High - Low) must be at least 3% of the low price. This filters out stocks that aren't moving enough to be worthwhile.
+
+The Volume Profile Context: The bot calculates the Volume Profile for the previous day to identify two key levels:
+
+Point of Control (POC): The price where the most volume was traded.
+
+Value Area High (VAH): The upper boundary of the price range where 70% of the volume traded.
+
+Bullish Conviction Filter: The stock's closing price must satisfy two conditions, indicating strong buying pressure into the close:
+
+The close must be above the POC.
+
+The close must be in the top 25% of the day's total range.
+
+Any stock that passes all of these filters is added to the day's watchlist. If no stocks meet these criteria, the bot will do nothing for the rest of the day.
+
+Phase 2: Market Open (The Setup)
+When: This phase occurs at the exact moment the market opens (9:30 AM EST).
+
+Goal: To validate that the bullish momentum from the previous day has carried over into the new session.
+
+How it Works:
+The bot takes the watchlist generated in Phase 1 and checks one simple but critical condition for each candidate:
+
+Opening Price vs. Prior Day's Value: The stock's opening price must be higher than the previous day's Value Area High (VAH).
+
+If a stock opens below the prior VAH, it is immediately disqualified for the day. This rule is crucial because it suggests that the market is not accepting the higher prices from the previous day, and the bullish thesis is invalid.
+
+Any stock that passes this check is now considered to have a valid "setup" and is actively monitored for a trade trigger.
+
+Phase 3: Live Session (The Trigger & Trade Management)
+When: This phase runs continuously from the market open until the close.
+
+Goal: To find the precise moment to enter a trade and then manage it according to pre-defined rules.
+
+How it Works:
+For each stock with a valid setup, the bot waits for a specific two-part pattern to occur:
+
+The "Dip": The stock's price must first trade below its opening price. This shows an initial rejection of the high prices, shaking out weak-handed buyers.
+
+The "Rip" (The Trigger): The stock's price must then rally and trade above the high of the opening 1-minute bar. This signals that buyers have absorbed the initial selling pressure and are now in control, confirming the bullish thesis.
+
+Execution & Risk Management:
+The moment the trigger occurs, the bot executes the following actions:
+
+Entry: A BUY order is placed at the high of the opening 1-minute bar.
+
+Stop-Loss: The initial stop-loss is placed at the lowest price the stock reached during the "Dip." The difference between the entry price and this low point defines the risk-per-share for the trade.
+
+Position Sizing: The bot uses a three-layer sizing model to determine the number of shares to buy:
+
+Risk-Based Size: Calculates the number of shares that would result in a 1% loss of total portfolio equity if the stop-loss is hit.
+
+Allocation Cap: Calculates the number of shares that would equal 25% of total portfolio equity.
+
+Final Size: It takes the smaller of the two quantities calculated above.
+
+Cash Check: It then confirms if there is enough settled cash to afford this position. If not, it scales down the position to what it can afford.
+
+Take Profit: A take-profit target is set at 2.5 times the initial risk-per-share above the entry price.
+
+End-of-Day Exit: If neither the stop-loss nor the take-profit target is hit, the position is automatically closed at 3:55 PM EST to avoid holding positions overnight.
+
+The bot does not use VWAP for entry or exit decisions in this specific strategy; its role is limited to the other strategies in the platform.

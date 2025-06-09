@@ -18,10 +18,11 @@ from strategies.volume_poc_strategy import SimplePocCrossStrategy
 from strategies.debug_visualization_strategy import DebugVisualizationStrategy
 from strategies.open_rejection_reverse_strategy import OpenRejectionReverseStrategy
 from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
-from .results import BacktestResults
+from backtest.results import BacktestResults
 import pytz
 
-# --- Configure logging ---
+# Configure a logger for the engine itself
+engine_logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BacktestEngine:
@@ -45,6 +46,7 @@ class BacktestEngine:
         self.fee_config = self.config.get('fees', {'model': 'zero'})
         self.symbols = []
         self.all_data = {}
+        self.session_data = {}
         self.ledger = BacktestLedger(
             initial_cash=self.backtest_params['initial_cash'],
             fee_model=self._initialize_fee_model()
@@ -53,6 +55,17 @@ class BacktestEngine:
         self.tz_str = self.strategy_params.get('timezone', 'America/New_York')
         self.timezone = pytz.timezone(self.tz_str)
         self._load_all_data()
+
+        engine_logger.info("Building trading calendar...")
+        all_dates = set()
+        for symbol_data in self.all_data.values():
+            if not symbol_data.empty:
+                all_dates.update(symbol_data.index.normalize().date)
+
+        # === FIX: Filter the calendar to only include weekdays (Mon=0, Sun=6) ===
+        self.trading_calendar = sorted([d for d in all_dates if d.weekday() < 5])
+        engine_logger.info(f"Calendar built with {len(self.trading_calendar)} unique trading days.")
+
 
     def _load_config(self, path: str):
         with open(path, 'r') as f:
@@ -83,7 +96,7 @@ class BacktestEngine:
                 if symbol not in self.all_data: self.all_data[symbol] = []
                 self.all_data[symbol].append(df)
             except Exception as e:
-                print(f"ERROR processing {filename}: {e}")
+                engine_logger.error(f"ERROR processing {filename}: {e}")
 
         for symbol, df_list in self.all_data.items():
             if df_list:
@@ -95,46 +108,68 @@ class BacktestEngine:
         if data.empty: return pd.DataFrame()
         return data.loc[data.index.date == target_date]
 
-    def run(self, trade_date: datetime):
+    def prepare_for_day(self, trade_date: datetime):
         self.trade_date = trade_date
+        engine_logger.info(f"\n--- Preparing for trade date: {self.trade_date.strftime('%Y-%m-%d')} ---")
 
-        # --- FIX #1: Settle cash from the previous day's trades ---
         self.ledger.settle_funds()
 
-        # --- FIX #2: Safely check for empty dataframes before processing ---
-        all_available_dates = sorted(list(set(
-            d.date() for s_data in self.all_data.values()
-            if isinstance(s_data, pd.DataFrame) and not s_data.empty
-            for d in s_data.index
-        )))
-
-        prev_day_date = next((d for d in sorted(all_available_dates, reverse=True) if d < trade_date.date()), None)
+        # === FIX: More robust previous-day and holiday handling ===
+        prev_day_date = None
+        try:
+            current_date_index = self.trading_calendar.index(trade_date.date())
+            if current_date_index > 0:
+                prev_day_date = self.trading_calendar[current_date_index - 1]
+                engine_logger.info(f"Found previous trading day via calendar lookup: {prev_day_date}")
+            else:
+                engine_logger.warning("This is the first day in the calendar, no previous day available.")
+        except ValueError:
+            engine_logger.warning(f"Date {trade_date.date()} not in trading calendar (likely a holiday). Manually searching for previous day.")
+            # Fallback for holidays that are in the user's date range but not in our data
+            for date in reversed(self.trading_calendar):
+                if date < trade_date.date():
+                    prev_day_date = date
+                    engine_logger.info(f"Found previous trading day via manual search: {prev_day_date}")
+                    break
 
         if not prev_day_date:
-            print(f"No prior day data found for {self.trade_date.strftime('%Y-%m-%d')}. Skipping scan.")
-            return None
+            engine_logger.error(f"FATAL: Could not determine previous trading day for {self.trade_date.strftime('%Y-%m-%d')}. Cannot scan for candidates.")
+            self.symbols = []
+            self.session_data = {}
+            return
 
         historical_data_for_scan = {s: self._get_data_for_date(df, prev_day_date) for s, df in self.all_data.items()}
 
+        valid_data_for_scan = {s: df for s, df in historical_data_for_scan.items() if not df.empty}
+        engine_logger.info(f"Assembled data for {len(valid_data_for_scan)} symbols for the scan based on {prev_day_date}.")
+
         strategy_class = self.STRATEGY_MAPPING[self.strategy_name]
         self.strategy = strategy_class(list(self.all_data.keys()), self.ledger, **self.strategy_params)
-
         self.symbols = self.strategy.scan_for_candidates(self.trade_date, historical_data_for_scan)
 
         if not self.symbols:
-            print(f"No candidates found for {self.trade_date.strftime('%Y-%m-%d')}. Skipping.")
-            return None
+            engine_logger.info(f"No candidates found by strategy for {self.trade_date.strftime('%Y-%m-%d')}.")
+            self.session_data = {}
+            return
 
         session_data = {s: self._get_data_for_date(self.all_data[s], self.trade_date.date()) for s in self.symbols if s in self.all_data}
-        session_data = {s: df for s, df in session_data.items() if not df.empty}
+        self.session_data = {s: df for s, df in session_data.items() if not df.empty}
 
-        if not session_data:
-            print(f"No market data available for any candidates on {self.trade_date.strftime('%Y-%m-%d')}. Skipping.")
+        if not self.session_data:
+            engine_logger.warning(f"No market data available for any candidates on {self.trade_date.strftime('%Y-%m-%d')}.")
+            return
+
+        self.strategy.on_session_start(self.session_data)
+        engine_logger.info(f"Preparation complete. Found {len(self.session_data)} candidates with data for today.")
+
+    def run_session(self):
+        if not self.session_data:
+            engine_logger.info("No data prepared for session. Skipping run.")
             return None
 
-        self.strategy.on_session_start(session_data)
+        engine_logger.info(f"--- Running trade session for {self.trade_date.strftime('%Y-%m-%d')} ---")
 
-        all_timestamps = sorted(list(set.union(*(set(df.index) for df in session_data.values()))))
+        all_timestamps = sorted(list(set.union(*(set(df.index) for df in self.session_data.values()))))
 
         for timestamp in all_timestamps:
             current_bar_data = {}
@@ -142,7 +177,7 @@ class BacktestEngine:
             market_prices = {}
             analytics = {}
 
-            for symbol, df in session_data.items():
+            for symbol, df in self.session_data.items():
                 if timestamp in df.index:
                     current_bar_data[symbol] = df.loc[timestamp]
                     market_prices[symbol] = df.loc[timestamp]['Close']

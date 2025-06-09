@@ -21,14 +21,13 @@ class BacktestResults:
             return None
 
         # --- Profit & Loss ---
-        # Note: PnL is now calculated on the ledger side, so we can just use it.
-        closing_trades = self.trade_log[self.trade_log['order_type'] == 'SELL'].copy()
-        total_pnl = closing_trades['pnl'].sum()
-        total_fees = self.ledger.total_fees
+        total_pnl = self.trade_log['pnl'].sum()
+        total_fees = self.trade_log['fees'].sum()
 
         # --- Win/Loss Analysis ---
-        winning_trades = closing_trades[closing_trades['pnl'] > 0]
-        losing_trades = closing_trades[closing_trades['pnl'] <= 0]
+        # === FIX: Use self.trade_log instead of the old closing_trades variable ===
+        winning_trades = self.trade_log[self.trade_log['pnl'] > 0]
+        losing_trades = self.trade_log[self.trade_log['pnl'] <= 0]
 
         num_winning = len(winning_trades)
         num_losing = len(losing_trades)
@@ -95,7 +94,6 @@ class BacktestResults:
         fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
         fig.suptitle('Portfolio Performance', fontsize=16)
 
-        # Plot Equity Curve
         ax1.plot(self.equity_curve.index, self.equity_curve['equity'], label='Equity', color='blue')
         ax1.plot(self.equity_curve.index, self.equity_curve['peak'], label='Peak Equity', color='green', linestyle='--')
         ax1.set_ylabel('Equity ($)')
@@ -103,7 +101,6 @@ class BacktestResults:
         ax1.grid(True, linestyle='--', alpha=0.6)
         ax1.legend()
 
-        # Plot Drawdown
         ax2.fill_between(self.equity_curve.index, self.equity_curve['drawdown'] * 100, 0, color='red', alpha=0.5)
         ax2.set_ylabel('Drawdown (%)')
         ax2.set_title('Drawdown')

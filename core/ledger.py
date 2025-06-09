@@ -25,9 +25,6 @@ class BacktestLedger:
         if self.unsettled_cash > 0:
             self.cash += self.unsettled_cash
             self.unsettled_cash = 0.0
-            # Record a history event for cash settlement for accurate equity curves
-            # Note: A proper implementation would pass the timestamp here.
-            # self._update_equity(timestamp, market_prices)
 
     def get_total_equity(self, market_prices: dict) -> float:
         """
@@ -62,13 +59,11 @@ class BacktestLedger:
         if order_type.upper() == 'BUY':
             cost = (quantity * price) + fees
             if self.cash < cost:
-                # This check now correctly uses settled cash only
-                print(f"WARNING: Insufficient settled cash to buy {quantity} of {symbol}. Skipping trade.")
+                print(f"WARNING: Insufficient settled cash to buy {quantity} of {symbol}. Have {self.cash:.2f}, need {cost:.2f}. Skipping trade.")
                 return False
 
             self.cash -= cost
             if symbol in self.open_positions:
-                # Logic to average into an existing position
                 old_qty = self.open_positions[symbol]['quantity']
                 old_cost = self.open_positions[symbol]['entry_price'] * old_qty
                 new_qty = old_qty + quantity
@@ -84,13 +79,17 @@ class BacktestLedger:
                 return False
 
             proceeds = (quantity * price) - fees
-            # --- MODIFICATION: Proceeds go to unsettled cash ---
             self.unsettled_cash += proceeds
 
             position = self.open_positions[symbol]
+
+            pnl = (price - position['entry_price']) * quantity - fees
+
             self.closed_trades.append({
-                'symbol': symbol, 'quantity': quantity, 'entry_price': position['entry_price'],
-                'exit_price': price, 'entry_time': position['entry_time'], 'exit_time': timestamp, 'fees': fees
+                'symbol': symbol, 'quantity': quantity,
+                'entry_price': position['entry_price'], 'exit_price': price,
+                'entry_time': position['entry_time'], 'exit_time': timestamp,
+                'fees': fees, 'pnl': pnl
             })
             position['quantity'] -= quantity
             if position['quantity'] == 0:
@@ -102,10 +101,16 @@ class BacktestLedger:
     def get_equity_curve(self):
         """Returns the portfolio equity curve as a pandas DataFrame."""
         equity_df = pd.DataFrame(self.history)
-        equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
-        equity_df.set_index('timestamp', inplace=True)
+
+        # === FINAL FIX: Remove the row with the bad timestamp BEFORE setting the index ===
+        equity_df.dropna(subset=['timestamp'], inplace=True)
+
+        if not equity_df.empty:
+            equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
+            equity_df.set_index('timestamp', inplace=True)
+
         return equity_df
 
     def get_trade_log(self):
-        """Returns the list of all closed trades."""
-        return self.closed_trades
+        """Returns the list of all closed trades as a DataFrame."""
+        return pd.DataFrame(self.closed_trades)

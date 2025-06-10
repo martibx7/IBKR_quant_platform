@@ -6,13 +6,15 @@ import os
 import logging
 from tqdm import tqdm
 from datetime import datetime
-import pytz
-from importlib import import_module
-import re
+from typing import Union
 
 from core.ledger import BacktestLedger
 from backtest.results import BacktestResults
 from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
+from analytics.profiles import get_session
+from importlib import import_module
+import re
+
 
 engine_logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,20 +33,15 @@ class BacktestEngine:
         self.all_data = {}
         self.session_data = {}
 
-        # --- MODIFIED: Initialization Order ---
-        # 1. Load all data first to know the symbol universe
         self._load_all_data()
 
-        # 2. Initialize the ledger with the fee model
         self.ledger = BacktestLedger(
             initial_cash=self.backtest_params['initial_cash'],
             fee_model=self._initialize_fee_model()
         )
 
-        # 3. Initialize the strategy, now with knowledge of all symbols
         self.strategy = self._initialize_strategy()
 
-        # 4. Build the trading calendar
         engine_logger.info("Building trading calendar...")
         all_dates = set()
         for symbol_data in self.all_data.values():
@@ -67,127 +64,94 @@ class BacktestEngine:
         return ZeroFeeModel()
 
     def _initialize_strategy(self):
-        """
-        Dynamically imports and initializes the strategy, providing either a specific
-        list of symbols from the config or the entire loaded universe.
-        """
         strategy_module_name = camel_to_snake(self.strategy_name)
         strategy_module_path = f'strategies.{strategy_module_name}'
-
         try:
             strategy_module = import_module(strategy_module_path)
             strategy_class = getattr(strategy_module, self.strategy_name)
         except (ImportError, AttributeError) as e:
             raise ImportError(f"Could not find strategy '{self.strategy_name}' in '{strategy_module_path}.py'. Error: {e}")
 
-        # Inject global tick size settings
-        self.strategy_params['tick_size_market_profile'] = self.backtest_params.get('tick_size_market_profile', 0.05)
-        self.strategy_params['tick_size_volume_profile'] = self.backtest_params.get('tick_size_volume_profile', 0.01)
+        self.strategy_params['tick_size'] = self.backtest_params.get('tick_size_volume_profile', 0.01)
 
-        # --- MODIFIED: Symbol Universe Logic ---
-        # Check if a specific list of symbols is provided in the strategy's parameters
-        if 'symbols' in self.strategy_params and self.strategy_params['symbols']:
-            symbols_to_use = self.strategy_params['symbols']
-            engine_logger.info(f"Using specific symbols from config for {self.strategy_name}: {symbols_to_use}")
-        else:
-            # Otherwise, default to the entire universe of loaded symbols
-            symbols_to_use = list(self.all_data.keys())
-            engine_logger.info(f"No specific symbols in config for {self.strategy_name}. Defaulting to all {len(symbols_to_use)} loaded symbols.")
+        symbols_to_use = self.strategy_params.get('symbols') or list(self.all_data.keys())
+        log_message = (f"Using specific symbols from config for {self.strategy_name}: {symbols_to_use}"
+                       if self.strategy_params.get('symbols')
+                       else f"No specific symbols in config for {self.strategy_name}. Defaulting to all {len(symbols_to_use)} loaded symbols.")
+        engine_logger.info(log_message)
 
         return strategy_class(symbols=symbols_to_use, ledger=self.ledger, **self.strategy_params)
 
-    # ... (the rest of the file remains the same) ...
     def _load_all_data(self):
         data_dir = self.backtest_params['data_dir']
         all_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
         for filename in tqdm(all_files, desc="Loading All Historical Data"):
-            symbol = filename.split('.csv')[0]
+            symbol = os.path.splitext(filename)[0]
             try:
                 file_path = os.path.join(data_dir, filename)
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(file_path, parse_dates=['date'])
                 df.columns = [col.strip().lower() for col in df.columns]
-                df.set_index(pd.to_datetime(df['date'], utc=True), inplace=True)
-                df.index.name = 'timestamp'
-                df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-                final_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-                df = df[final_cols].apply(pd.to_numeric)
-                if symbol not in self.all_data: self.all_data[symbol] = []
-                self.all_data[symbol].append(df)
+                df = df.rename(columns={'date': 'timestamp'})
+                df.set_index(pd.to_datetime(df['timestamp'], utc=True), inplace=True)
+                df = df[['open', 'high', 'low', 'close', 'volume']]
+                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+                self.all_data[symbol] = df.apply(pd.to_numeric)
             except Exception as e:
                 engine_logger.error(f"ERROR processing {filename}: {e}")
 
-        for symbol, df_list in self.all_data.items():
-            if df_list:
-                self.all_data[symbol] = pd.concat(df_list).sort_index()
-            else:
-                self.all_data[symbol] = pd.DataFrame()
-
-    def _get_data_for_date(self, data, target_date):
-        if data.empty: return pd.DataFrame()
-        return data.loc[data.index.date == target_date]
-
-    def run_backtest(self):
-        engine_logger.info(f"Starting backtest for strategy '{self.strategy_name}'...")
-        for trade_date in tqdm(self.trading_calendar, desc="Running Backtest"):
-            trade_date_dt = datetime.combine(trade_date, datetime.min.time())
-            self.prepare_for_day(trade_date_dt)
-            if self.session_data:
-                self.run_session()
-        engine_logger.info("Backtest finished.")
-        return BacktestResults(self.ledger)
+    def _get_previous_trading_day(self, current_date_obj: datetime.date) -> Union[datetime.date, None]:
+        try:
+            idx = self.trading_calendar.index(current_date_obj)
+            return self.trading_calendar[idx - 1] if idx > 0 else None
+        except ValueError:
+            return next((d for d in reversed(self.trading_calendar) if d < current_date_obj), None)
 
     def prepare_for_day(self, trade_date: datetime):
-        self.trade_date = trade_date
-        engine_logger.info(f"\n--- Preparing for trade date: {self.trade_date.strftime('%Y-%m-%d')} ---")
+        self.current_trade_date = trade_date
+        engine_logger.info(f"\n--- Preparing for trade date: {trade_date.strftime('%Y-%m-%d')} ---")
         self.ledger.settle_funds()
 
-        prev_day_date = None
-        try:
-            current_date_index = self.trading_calendar.index(trade_date.date())
-            if current_date_index > 0:
-                prev_day_date = self.trading_calendar[current_date_index - 1]
-        except ValueError:
-            engine_logger.warning(f"Date {trade_date.date()} not in trading calendar. Skipping day.")
+        if trade_date.date() not in self.trading_calendar:
+            engine_logger.warning(f"Date {trade_date.strftime('%Y-%m-%d')} not in trading calendar. Skipping day.")
             self.session_data = {}
             return
 
-        if not prev_day_date:
-            engine_logger.warning("This is the first day in the calendar, no previous day available for scanning.")
-            self.symbols = []
+        self.prev_trade_date = self._get_previous_trading_day(trade_date.date())
+        if not self.prev_trade_date:
+            engine_logger.warning(f"No previous trading day found for {trade_date.strftime('%Y-%m-%d')}. Cannot scan for candidates.")
             self.session_data = {}
             return
 
-        historical_data_for_scan = {s: self._get_data_for_date(df, prev_day_date) for s, df in self.all_data.items()}
-        self.symbols = self.strategy.scan_for_candidates(self.trade_date, historical_data_for_scan)
+        candidate_symbols = self.strategy.scan_for_candidates(self.all_data, self.prev_trade_date)
+        engine_logger.info(f"Preparation complete. Found {len(candidate_symbols)} candidates for today.")
 
-        if not self.symbols:
-            engine_logger.info(f"No candidates found by strategy for {self.trade_date.strftime('%Y-%m-%d')}.")
-            self.session_data = {}
-            return
-
-        session_data = {s: self._get_data_for_date(self.all_data[s], self.trade_date.date()) for s in self.symbols if s in self.all_data}
-        self.session_data = {s: df for s, df in session_data.items() if not df.empty}
-
-        if not self.session_data:
-            engine_logger.warning(f"No market data available for any candidates on {self.trade_date.strftime('%Y-%m-%d')}.")
-            return
-
-        self.strategy.on_session_start(self.session_data)
-        engine_logger.info(f"Preparation complete. Found {len(self.session_data)} candidates with data for today.")
+        self.session_data = {}
+        for symbol in candidate_symbols:
+            symbol_data = get_session(self.all_data.get(symbol, pd.DataFrame()), trade_date.date(), "Regular")
+            if not symbol_data.empty:
+                self.session_data[symbol] = symbol_data
 
     def run_session(self):
-        engine_logger.info(f"--- Running trade session for {self.trade_date.strftime('%Y-%m-%d')} ---")
+        if not self.session_data:
+            engine_logger.info(f"No session data for {self.current_trade_date.strftime('%Y-%m-%d')}. Nothing to process.")
+            return
+
         all_timestamps = sorted(list(set.union(*(set(df.index) for df in self.session_data.values()))))
+        self.strategy.on_session_start(self.session_data)
 
-        for timestamp in all_timestamps:
-            current_bar_data = {s: df.loc[timestamp] for s, df in self.session_data.items() if timestamp in df.index}
-            session_bars = {s: df.loc[df.index <= timestamp] for s, df in self.session_data.items()}
-            market_prices = {s: df.loc[timestamp]['Close'] for s, df in self.session_data.items() if timestamp in df.index}
-
-            analytics = {}
-
-            if current_bar_data:
-                self.strategy.on_bar(current_bar_data, session_bars, market_prices, analytics)
+        for timestamp in tqdm(all_timestamps, desc=f"Simulating {self.current_trade_date.strftime('%Y-%m-%d')}", leave=False):
+            # --- RESTORED: This block is crucial for equity calculation and was missing. ---
+            market_prices = {s: df.loc[timestamp, 'Close'] for s, df in self.session_data.items() if timestamp in df.index}
+            if market_prices:
                 self.ledger._update_equity(timestamp, market_prices)
+            # --- END RESTORED BLOCK ---
+
+            for sym, data in self.session_data.items():
+                if timestamp in data.index:
+                    self.strategy.current_prices[sym] = data.loc[timestamp, 'Close']
+            for sym, data in self.session_data.items():
+                if timestamp in data.index:
+                    bar = data.loc[timestamp]
+                    self.strategy.on_bar(sym, bar)
 
         self.strategy.on_session_end()

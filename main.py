@@ -1,9 +1,12 @@
 # main.py
+
 import yaml
 from datetime import datetime, timedelta
 import os
 import pandas as pd
 from backtest.engine import BacktestEngine
+# --- FIX: Import BacktestResults ---
+from backtest.results import BacktestResults
 
 def get_trade_dates(start_date_str, end_date_str) -> list[datetime]:
     """
@@ -38,17 +41,11 @@ def main():
     # --- Initialize and Run the Engine ---
     engine = BacktestEngine(config_path)
 
-    # This part for aggregation is not fully implemented yet,
-    # but the foundation is here. We'll track the last day's results.
-    final_results = None
     for trade_date in trade_dates:
         try:
-            # === MODIFIED: More realistic daily flow ===
             engine.prepare_for_day(trade_date)
-            results = engine.run_session()
-
-            if results:
-                final_results = results # Keep track of the latest results
+            # The session runs and populates the ledger inside the engine
+            engine.run_session()
 
         except Exception as e:
             print(f"An error occurred on {trade_date.strftime('%Y-%m-%d')}: {e}")
@@ -56,13 +53,17 @@ def main():
             traceback.print_exc() # Print full traceback for debugging
             continue
 
-    # --- Aggregate and Display Final Results ---
-    if final_results:
+    # --- FIX: Aggregate and Display Final Results from the Ledger ---
+    # After the loop, the engine's ledger is full of trades.
+    # Now, we create the results object from it.
+    final_results = BacktestResults(engine.ledger)
+
+    if not final_results.trade_log.empty:
         print("\n--- Backtest Run Complete ---")
         final_results.print_summary()
         final_results.plot_equity_curve()
     else:
-        print("\nBacktest run finished, but no results were generated.")
+        print("\nBacktest run finished, but no trades were executed.")
 
 if __name__ == '__main__':
     main()

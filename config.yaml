@@ -3,6 +3,8 @@
 backtest:
   initial_cash: 3000
   data_dir: 'data/historical'
+  tick_size_market_profile: 0.01
+  tick_size_volume_profile: 0.01
 
 strategy:
   # Set the active strategy here.
@@ -11,6 +13,7 @@ strategy:
   # --- All strategy parameters are defined below ---
   parameters:
     OpenRejectionReverseStrategy:
+      profile_type: 'volume' # Choose 'volume' or 'market' for the profiler
       log_file: 'logs/open_rejection_reverse.log'
       risk_per_trade_pct: 0.01      # Risk 1% of total equity per trade
       max_allocation_pct: 0.25      # Never allocate more than 25% of equity to a single trade
@@ -20,6 +23,7 @@ strategy:
       min_daily_volume: 500000      # Minimum 500k shares traded on the previous day
       min_prev_day_range_pct: 0.03  # Previous day's range must be at least 3% to be a candidate
       timezone: 'America/New_York'
+      # symbols: ['AAPL', 'GOOG']     # uncomment to use specific symbols
 
     OpenDriveMomentumStrategy:
       log_file: 'logs/open_drive_momentum.log'
@@ -30,9 +34,6 @@ strategy:
       exit_time: '15:55:00'
       timezone: 'America/New_York'
 
-    DebugVisualizationStrategy:
-      tick_size: 0.01
-      timezone: 'America/New_York'
 
     SimpleMomentumStrategy:
       daily_change_threshold: 0.10

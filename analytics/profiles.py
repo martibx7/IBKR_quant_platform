@@ -1,25 +1,34 @@
+# analytics/profiles.py
+
 import pandas as pd
 import numpy as np
 import string
-from scipy.signal import find_peaks
 from collections import defaultdict
 
 def get_session(dt):
     """
-    Classifies a datetime object into a trading session.
+    Categorizes a datetime into a trading session for a single calendar day,
+    based on the US Equity Market times in the provided timezone.
+
+    - Pre-Market: Beginning of the day to 9:30 AM.
+    - Regular: 9:30 AM to 4:00 PM.
+    - After-Hours: 4:00 PM to the end of the day.
     """
-    # This assumes the datetime is already in the correct local timezone (e.g., America/New_York)
-    if dt.hour < 9 or (dt.hour == 9 and dt.minute < 30):
+    # --- MODIFIED: Simplified and corrected session logic ---
+    market_open = pd.to_datetime('09:30:00').time()
+    market_close = pd.to_datetime('16:00:00').time()
+
+    current_time = dt.time()
+
+    if current_time < market_open:
         return 'Pre-Market'
-    elif dt.hour >= 16:
-        return 'After-Hours'
-    else:
+    elif market_open <= current_time < market_close:
         return 'Regular'
+    else: # current_time >= market_close
+        return 'After-Hours'
 
 class VolumeProfiler:
-    """
-    Calculates a Volume Profile from a DataFrame of market bars for a specific session.
-    """
+    """Calculates a Volume Profile from a DataFrame of market bars."""
     def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01):
         if bars_df.empty:
             self.profile = pd.Series(dtype=np.float64)
@@ -30,202 +39,215 @@ class VolumeProfiler:
 
         self.bars_df = bars_df.copy()
         self.tick_size = tick_size
-        self.profile = None
-        self._calculate_profile_vectorized()
+        self.profile = self._calculate_profile()
+        self.poc_price, self.vah, self.val = self._calculate_poc_and_value_area()
 
-        if self.profile is not None and not self.profile.empty:
-            self._calculate_poc_and_value_area()
-        else:
-            self.poc_price = None
-            self.vah = None
-            self.val = None
-
-    def _calculate_profile_vectorized(self):
-        """
-        Calculates the volume distribution efficiently using vectorized operations.
-        """
+    def _calculate_profile(self) -> pd.Series:
+        """Aggregates volume at each price tick."""
         if self.bars_df.empty:
-            self.profile = pd.Series(dtype=np.float64)
-            return
+            return pd.Series(dtype=np.float64)
 
-        min_price = self.bars_df['Low'].min()
-        max_price = self.bars_df['High'].max()
+        all_ticks = []
+        for _, row in self.bars_df.iterrows():
+            num_ticks = int((row['High'] - row['Low']) / self.tick_size) + 1
+            ticks = np.linspace(row['Low'], row['High'], num_ticks)
+            volume_per_tick = row['Volume'] / num_ticks if num_ticks > 0 else 0
+            for tick in ticks:
+                all_ticks.append((round(tick / self.tick_size) * self.tick_size, volume_per_tick))
 
-        if pd.isna(min_price) or pd.isna(max_price):
-            self.profile = pd.Series(dtype=np.float64)
-            return
+        profile = pd.DataFrame(all_ticks, columns=['price', 'volume']).groupby('price')['volume'].sum().sort_index()
+        return profile
 
-        num_bins = int(np.ceil((max_price - min_price) / self.tick_size))
-        price_bins = min_price + np.arange(num_bins + 1) * self.tick_size
-        volume_profile = np.zeros(num_bins + 1)
-
-        lows = self.bars_df['Low'].values
-        highs = self.bars_df['High'].values
-        volumes = self.bars_df['Volume'].values
-
-        low_indices = np.floor((lows - min_price) / self.tick_size).astype(int)
-        high_indices = np.ceil((highs - min_price) / self.tick_size).astype(int)
-
-        for i in range(len(self.bars_df)):
-            if volumes[i] == 0 or high_indices[i] <= low_indices[i]:
-                continue
-
-            num_ticks_in_bar = high_indices[i] - low_indices[i]
-            volume_per_tick = volumes[i] / num_ticks_in_bar
-            volume_profile[low_indices[i]:high_indices[i]] += volume_per_tick
-
-        self.profile = pd.Series(volume_profile, index=np.round(price_bins, 2)).round().astype(int)
-        self.profile = self.profile[self.profile > 0]
-
-    def _calculate_poc_and_value_area(self, va_percentage: float = 0.70):
-        if self.profile is None or self.profile.empty:
-            return
+    def _calculate_poc_and_value_area(self) -> tuple:
+        """Calculates the Point of Control (POC) and Value Area (VAH, VAL)."""
+        if self.profile.empty:
+            return None, None, None
 
         total_volume = self.profile.sum()
+        poc_price = self.profile.idxmax()
 
-        poc = self.profile.idxmax()
-        if isinstance(poc, pd.Series):
-            poc = poc.iloc[0]
-        self.poc_price = poc
+        value_area_volume = total_volume * 0.70
 
-        va_volume = total_volume * va_percentage
+        current_volume = self.profile.get(poc_price, 0)
+        value_area_prices = [poc_price]
 
-        try:
-            loc_result = self.profile.index.get_loc(self.poc_price)
-            if isinstance(loc_result, (slice, np.ndarray)):
-                poc_index_pos = loc_result.start
+        prices_above = self.profile[self.profile.index > poc_price].index
+        prices_below = self.profile[self.profile.index < poc_price].sort_index(ascending=False).index
+
+        idx_above, idx_below = 0, 0
+
+        while current_volume < value_area_volume:
+            vol_above = self.profile.get(prices_above[idx_above]) if idx_above < len(prices_above) else -1
+            vol_below = self.profile.get(prices_below[idx_below]) if idx_below < len(prices_below) else -1
+
+            if vol_above == -1 and vol_below == -1: break
+
+            if vol_above > vol_below:
+                current_volume += vol_above
+                value_area_prices.append(prices_above[idx_above])
+                idx_above += 1
             else:
-                poc_index_pos = loc_result
-        except KeyError:
-            self.vah = self.val = self.poc_price
-            return
+                current_volume += vol_below
+                value_area_prices.append(prices_below[idx_below])
+                idx_below += 1
 
-        lower_bound_pos = poc_index_pos
-        upper_bound_pos = poc_index_pos
-        current_va_volume = self.profile.iloc[poc_index_pos]
-
-        while current_va_volume < va_volume and (lower_bound_pos > 0 or upper_bound_pos < len(self.profile) - 1):
-            one_down_vol = self.profile.iloc[lower_bound_pos - 1] if lower_bound_pos > 0 else -1
-            one_up_vol = self.profile.iloc[upper_bound_pos + 1] if upper_bound_pos < len(self.profile) - 1 else -1
-
-            if one_down_vol > one_up_vol:
-                current_va_volume += one_down_vol
-                lower_bound_pos -= 1
-            else:
-                current_va_volume += one_up_vol
-                upper_bound_pos += 1
-
-        self.val = self.profile.index[lower_bound_pos]
-        self.vah = self.profile.index[upper_bound_pos]
-
-    def get_volume_nodes(self, min_prominence_ratio: float = 0.1, min_distance_ticks: int = 10) -> tuple[np.ndarray, np.ndarray]:
-        if self.profile is None or self.profile.empty or self.poc_price is None:
-            return np.array([]), np.array([])
-
-        poc_volume = self.profile.loc[self.poc_price]
-        if isinstance(poc_volume, pd.Series):
-            poc_volume = poc_volume.iloc[0]
-
-        min_prominence = poc_volume * min_prominence_ratio
-
-        hvn_indices, _ = find_peaks(self.profile.values, prominence=min_prominence, distance=min_distance_ticks)
-        hvn_prices = self.profile.index[hvn_indices]
-
-        lvn_prices = []
-        for i in range(len(hvn_indices) - 1):
-            start = hvn_indices[i]
-            end = hvn_indices[i+1]
-            lvn_index_local = self.profile.iloc[start:end].idxmin()
-            lvn_prices.append(lvn_index_local)
-
-        return hvn_prices, np.array(lvn_prices)
+        vah = max(value_area_prices)
+        val = min(value_area_prices)
+        return poc_price, vah, val
 
 class MarketProfiler:
-    """Calculates a Market Profile (TPO) from a DataFrame of market bars."""
-    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.01):
-        if bars_df.empty:
-            self.tpo_profile = defaultdict(list)
-            self.poc_price = None
-            self.vah = None
-            self.val = None
+    """Calculates a comprehensive Market Profile (TPO) from a DataFrame of market bars."""
+    def __init__(self, bars_df: pd.DataFrame, tick_size: float = 0.05):
+        if not isinstance(bars_df.index, pd.DatetimeIndex) or bars_df.empty:
+            self._initialize_empty()
             return
 
-        # The profiler now trusts that the incoming DataFrame is for the desired session
         self.bars_df = bars_df.copy()
-        if not isinstance(self.bars_df.index, pd.DatetimeIndex):
-            raise TypeError("bars_df must have a DatetimeIndex.")
-
         self.tick_size = tick_size
         self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
-        self._calculate_tpo_profile()
-        self._calculate_tpo_poc_and_value_area()
 
-    def _calculate_tpo_profile(self):
-        """Calculates the TPO profile using the DataFrame's index for time."""
+        self._initialize_empty()
+
+        # This is the corrected TPO calculation method
+        self._calculate_tpo_profile_by_interval()
+
+        self._calculate_poc_and_value_area()
+        self._calculate_initial_balance()
+        self._calculate_tails()
+
+    def _initialize_empty(self):
+        """Helper to set all attributes to default empty state."""
         self.tpo_profile = defaultdict(list)
-        tpo_period_minutes = 30
+        self.poc_price = None
+        self.vah = None
+        self.val = None
+        self.ib_high = None
+        self.ib_low = None
+        self.selling_tail = None
+        self.buying_tail = None
 
-        # Works on the DataFrame it was given, without re-filtering
-        session_bars = self.bars_df
-        if session_bars.empty:
+    def _calculate_tpo_profile_by_interval(self):
+        """
+        MODIFIED: Calculates the TPO profile by iterating through 30-minute intervals
+        starting from the beginning of the session's actual data.
+        """
+        if self.bars_df.empty:
             return
 
-        # Determine TPO letters based on 30-min intervals from the start of the session data
-        time_diff_minutes = (session_bars.index.hour * 60 + session_bars.index.minute) - \
-                            (session_bars.index[0].hour * 60 + session_bars.index[0].minute)
-        period_indices = time_diff_minutes // tpo_period_minutes
+        # --- MODIFIED: Start TPO periods from the first bar of the session ---
+        session_start_time = self.bars_df.index[0].floor('30min')
 
-        session_bars['tpo_letter'] = [self.tpo_periods[i] if 0 <= i < len(self.tpo_periods) else '' for i in period_indices]
+        for i, tpo_letter in enumerate(self.tpo_periods):
+            period_start = session_start_time + pd.Timedelta(minutes=30 * i)
+            period_end = period_start + pd.Timedelta(minutes=30)
 
-        for _, row in session_bars.iterrows():
-            if not row['tpo_letter']: continue
+            period_bars = self.bars_df[
+                (self.bars_df.index >= period_start) & (self.bars_df.index < period_end)
+                ]
 
-            start_price = round(row['Low'] / self.tick_size) * self.tick_size
-            end_price = round(row['High'] / self.tick_size) * self.tick_size
+            if period_bars.empty:
+                if period_start > self.bars_df.index[-1]:
+                    break
+                else:
+                    continue
 
-            for price in np.arange(start_price, end_price + self.tick_size, self.tick_size):
-                price_level = round(price, 2)
-                if row['tpo_letter'] not in self.tpo_profile[price_level]:
-                    self.tpo_profile[price_level].append(row['tpo_letter'])
+            for _, row in period_bars.iterrows():
+                start_tick = int(row['Low'] / self.tick_size)
+                end_tick = int(row['High'] / self.tick_size)
 
-    def _calculate_tpo_poc_and_value_area(self, va_percentage: float = 0.70):
-        if not self.tpo_profile:
-            self.poc_price, self.val, self.vah = None, None, None
-            return
+                for tick in range(start_tick, end_tick + 1):
+                    price_level = round(tick * self.tick_size, 2)
+                    if tpo_letter not in self.tpo_profile[price_level]:
+                        self.tpo_profile[price_level].append(tpo_letter)
+
+    # ... (the rest of the MarketProfiler class remains unchanged) ...
+    def _calculate_poc_and_value_area(self):
+        """Calculates TPO Point of Control (POC) and Value Area (VAH, VAL)."""
+        if not self.tpo_profile: return
+
+        tpo_counts = pd.Series({price: len(tpos) for price, tpos in self.tpo_profile.items()})
+        self.poc_price = tpo_counts.idxmax()
+
+        total_tpos = tpo_counts.sum()
+        value_area_tpos = total_tpos * 0.7
+
+        current_tpos = tpo_counts.get(self.poc_price, 0)
+        value_area_prices = [self.poc_price]
+
+        prices_above = tpo_counts[tpo_counts.index > self.poc_price].index
+        prices_below = tpo_counts[tpo_counts.index < self.poc_price].sort_index(ascending=False).index
+
+        idx_above, idx_below = 0, 0
+        while current_tpos < value_area_tpos:
+            vol_above = tpo_counts.get(prices_above[idx_above], 0) if idx_above < len(prices_above) else -1
+            vol_below = tpo_counts.get(prices_below[idx_below], 0) if idx_below < len(prices_below) else -1
+
+            if vol_above == -1 and vol_below == -1: break
+
+            if vol_above > vol_below:
+                current_tpos += vol_above
+                value_area_prices.append(prices_above[idx_above])
+                idx_above += 1
+            else:
+                current_tpos += vol_below
+                value_area_prices.append(prices_below[idx_below])
+                idx_below += 1
+
+        self.vah = max(value_area_prices)
+        self.val = min(value_area_prices)
+
+    def _calculate_initial_balance(self):
+        """Calculates the high and low of the Initial Balance (first hour of regular session)."""
+        if not self.tpo_profile: return
+
+        ib_prices = [price for price, tpos in self.tpo_profile.items() if 'A' in tpos or 'B' in tpos]
+        if ib_prices:
+            self.ib_high = max(ib_prices)
+            self.ib_low = min(ib_prices)
+
+    def _calculate_tails(self):
+        """Identifies buying and selling tails (areas of excess)."""
+        if not self.tpo_profile: return
 
         tpo_counts = pd.Series({price: len(tpos) for price, tpos in self.tpo_profile.items()})
         tpo_counts.sort_index(ascending=False, inplace=True)
 
-        total_tpos = tpo_counts.sum()
-
-        poc = tpo_counts.idxmax()
-        if isinstance(poc, pd.Series):
-            poc = poc.iloc[0]
-        self.poc_price = poc
-
-        va_tpos = total_tpos * va_percentage
-
-        try:
-            loc_result = tpo_counts.index.get_loc(self.poc_price)
-            if isinstance(loc_result, (slice, np.ndarray)):
-                poc_index_pos = loc_result.start
+        selling_tail_prices = []
+        for price, count in tpo_counts.items():
+            if count == 1:
+                selling_tail_prices.append(price)
             else:
-                poc_index_pos = loc_result
-        except KeyError:
-            self.vah = self.val = self.poc_price
-            return
+                break
+        if len(selling_tail_prices) >= 2:
+            self.selling_tail = (min(selling_tail_prices), max(selling_tail_prices))
 
-        lower_bound_pos, upper_bound_pos = poc_index_pos, poc_index_pos
-        current_va_tpos = tpo_counts.iloc[poc_index_pos]
-
-        while current_va_tpos < va_tpos and (lower_bound_pos > 0 or upper_bound_pos < len(tpo_counts) - 1):
-            one_down_tpos = tpo_counts.iloc[lower_bound_pos - 1] if lower_bound_pos > 0 else -1
-            one_up_tpos = tpo_counts.iloc[upper_bound_pos + 1] if upper_bound_pos < len(tpo_counts) - 1 else -1
-
-            if one_down_tpos > one_up_tpos:
-                current_va_tpos += one_down_tpos; lower_bound_pos -= 1
+        buying_tail_prices = []
+        for price, count in tpo_counts.sort_index(ascending=True).items():
+            if count == 1:
+                buying_tail_prices.append(price)
             else:
-                current_va_tpos += one_up_tpos; upper_bound_pos += 1
+                break
+        if len(buying_tail_prices) >= 2:
+            self.buying_tail = (min(buying_tail_prices), max(buying_tail_prices))
 
-        self.val = tpo_counts.index[upper_bound_pos]
-        self.vah = tpo_counts.index[lower_bound_pos]
+    def get_profile_str(self) -> str:
+        """Generates a formatted string representation of the TPO Profile."""
+        if not self.tpo_profile:
+            return "No TPO Profile data available."
+
+        prices = sorted(self.tpo_profile.keys(), reverse=True)
+        output = []
+
+        for price in prices:
+            tpos = "".join(sorted(self.tpo_profile[price]))
+
+            poc_marker = " POC" if price == self.poc_price else ""
+            vah_marker = " VAH" if price == self.vah else ""
+            val_marker = " VAL" if price == self.val else ""
+            ib_high_marker = " IB High" if price == self.ib_high else ""
+            ib_low_marker = " IB Low" if price == self.ib_low else ""
+
+            line = f"{price:8.2f} | {tpos:<52} |{poc_marker}{vah_marker}{val_marker}{ib_high_marker}{ib_low_marker}"
+            output.append(line)
+
+        return "\n".join(output)

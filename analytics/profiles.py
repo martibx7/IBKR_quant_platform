@@ -77,6 +77,32 @@ class VolumeProfiler:
 
         return {'poc_price': poc_price, 'value_area_high': vah, 'value_area_low': val}
 
+    def calculate_full_profile_for_plotting(self, df: pd.DataFrame) -> pd.Series:
+        """
+        A helper method specifically for plotting tools that need the raw
+        volume distribution Series, not just the key values.
+        """
+        if df.empty or df['Volume'].sum() == 0:
+            return pd.Series(dtype=float)
+
+        min_price = df['Low'].min()
+        max_price = df['High'].max()
+        price_levels = np.arange(min_price, max_price + self.tick_size, self.tick_size)
+        volume_distribution = pd.Series(0.0, index=np.round(price_levels, 5))
+
+        for _, row in df.iterrows():
+            low, high, vol = row['Low'], row['High'], row['Volume']
+            if vol == 0 or high <= low: continue
+
+            relevant_levels_mask = (volume_distribution.index >= low) & (volume_distribution.index <= high)
+            num_levels = relevant_levels_mask.sum()
+
+            if num_levels > 0:
+                volume_per_level = vol / num_levels
+                volume_distribution.loc[relevant_levels_mask] += volume_per_level
+
+        return volume_distribution
+
 class MarketProfiler:
     """Calculates a comprehensive Market Profile (TPO)."""
     def __init__(self, tick_size: float = 0.05):

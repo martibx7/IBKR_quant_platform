@@ -8,7 +8,7 @@ backtest:
 
 strategy:
   # Set the active strategy here.
-  name: 'OpenRejectionReverseStrategy'
+  name: 'ValueMigrationStrategy'
 
   # --- All strategy parameters are defined below ---
   parameters:
@@ -41,7 +41,13 @@ strategy:
       r_unit_pct: 0.02
 
     ValueMigrationStrategy:
-      risk_per_trade_pct: 0.01
+      log_file: 'logs/value_migration.log'
+      risk_per_trade_pct: 0.02      # Risk 2% of total equity per trade
+      max_allocation_pct: 0.25      # Never allocate more than 25% of equity to a single trade
+      timezone: 'America/New_York'
+      min_price: 2.0
+      max_price: 30.0
+      max_daily_trades: 10 # Limit the number of trades per d
 
     SimplePocCrossStrategy:
       trade_quantity: 100

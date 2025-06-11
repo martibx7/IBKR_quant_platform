@@ -8,4 +8,4 @@ ib-async
 python-dotenv
 polygon-api-client
 tqdm
-mplfinanceS
+mplfinance

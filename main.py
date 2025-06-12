@@ -8,13 +8,9 @@ from backtest.engine import BacktestEngine
 from backtest.results import BacktestResults
 
 def get_trade_dates(start_date_str, end_date_str) -> list[datetime]:
-    """
-    Generates a list of trading dates between the start and end date,
-    excluding weekends.
-    """
+    # ... (this function is unchanged) ...
     start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
     end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-
     trade_dates = []
     current_date = start_date
     while current_date <= end_date:
@@ -29,11 +25,10 @@ def main():
     """
     config_path = 'config.yaml'
 
-    # --- FIX: Added robust input validation for dates ---
+    # Using the improved input validation from before
     while True:
         start_date_str = input("Enter backtest start date (YYYY-MM-DD): ")
         try:
-            # Validate format
             datetime.strptime(start_date_str, '%Y-%m-%d')
             break
         except ValueError:
@@ -42,12 +37,10 @@ def main():
     while True:
         end_date_str = input("Enter backtest end date (YYYY-MM-DD): ")
         try:
-            # Validate format
             datetime.strptime(end_date_str, '%Y-%m-%d')
             break
         except ValueError:
             print("Invalid format. Please use YYYY-MM-DD.")
-    # --- END FIX ---
 
     trade_dates = get_trade_dates(start_date_str, end_date_str)
 
@@ -55,7 +48,8 @@ def main():
         print("No trading dates in the specified range.")
         return
 
-    engine = BacktestEngine(config_path)
+    # --- UPDATED: Pass dates to the engine ---
+    engine = BacktestEngine(config_path, start_date=start_date_str, end_date=end_date_str)
 
     for trade_date in trade_dates:
         try:

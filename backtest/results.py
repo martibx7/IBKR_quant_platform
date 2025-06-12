@@ -20,12 +20,15 @@ class BacktestResults:
             print("No trades were executed. Cannot calculate metrics.")
             return None
 
-        # --- Profit & Loss ---
+        # --- Profit & Loss --
         total_pnl = self.trade_log['pnl'].sum()
         total_fees = self.trade_log['fees'].sum()
+        net_pnl = total_pnl - total_fees
+
+        initial_equity = self.ledger.initial_cash
+        final_equity = self.equity_curve['equity'].iloc[-1]
 
         # --- Win/Loss Analysis ---
-        # === FIX: Use self.trade_log instead of the old closing_trades variable ===
         winning_trades = self.trade_log[self.trade_log['pnl'] > 0]
         losing_trades = self.trade_log[self.trade_log['pnl'] <= 0]
 
@@ -34,44 +37,47 @@ class BacktestResults:
         total_trades = num_winning + num_losing
         win_rate = (num_winning / total_trades) * 100 if total_trades > 0 else 0
 
-        avg_win = winning_trades['pnl'].mean() if num_winning > 0 else 0
-        avg_loss = losing_trades['pnl'].mean() if num_losing > 0 else 0
-
         gross_profit = winning_trades['pnl'].sum()
         gross_loss = abs(losing_trades['pnl'].sum())
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-        # --- Equity and Drawdown ---
-        initial_equity = self.equity_curve['equity'].iloc[0]
-        final_equity = self.equity_curve['equity'].iloc[-1]
+        avg_win = winning_trades['pnl'].mean()
+        avg_loss = losing_trades['pnl'].mean()
 
+        # --- UPDATED: Drawdown is calculated on the high-frequency equity curve ---
         self.equity_curve['peak'] = self.equity_curve['equity'].cummax()
-        self.equity_curve['drawdown'] = (self.equity_curve['equity'] - self.equity_curve['peak']) / self.equity_curve['peak']
-        max_drawdown = self.equity_curve['drawdown'].min() * 100
+        self.equity_curve['drawdown'] = self.equity_curve['equity'] - self.equity_curve['peak']
+        max_drawdown = self.equity_curve['drawdown'].min() if not self.equity_curve['drawdown'].empty else 0
+        max_drawdown_pct = (self.equity_curve['drawdown'] / self.equity_curve['peak']).min() if not self.equity_curve['drawdown'].empty else 0
 
-        # --- Sharpe Ratio ---
-        self.equity_curve['returns'] = self.equity_curve['equity'].pct_change().fillna(0)
-        sharpe_ratio = 0
-        if self.equity_curve['returns'].std() > 0:
-            # Assuming 252 trading days in a year for annualization
-            sharpe_ratio = (self.equity_curve['returns'].mean() / self.equity_curve['returns'].std()) * np.sqrt(252)
+        # --- UPDATED: Sharpe Ratio is calculated on resampled DAILY returns ---
+        daily_equity = self.equity_curve['equity'].resample('D').last()
+        daily_returns = daily_equity.pct_change().dropna()
+        sharpe_ratio = self.calculate_sharpe_ratio(daily_returns)
 
-
-        metrics = {
-            "Initial Equity": f"${initial_equity:,.2f}",
-            "Final Equity": f"${final_equity:,.2f}",
-            "Total PnL": f"${total_pnl:,.2f}",
-            "Total Fees": f"${total_fees:,.2f}",
-            "Net PnL": f"${total_pnl - total_fees:,.2f}",
-            "Total Trades": total_trades,
-            "Win Rate": f"{win_rate:.2f}%",
-            "Profit Factor": f"{profit_factor:.2f}",
-            "Avg Win": f"${avg_win:,.2f}",
-            "Avg Loss": f"${avg_loss:,.2f}",
-            "Max Drawdown": f"{max_drawdown:.2f}%",
-            "Sharpe Ratio (annualized)": f"{sharpe_ratio:.2f}"
+        return {
+            'Initial Equity': f"${initial_equity:,.2f}",
+            'Final Equity': f"${final_equity:,.2f}",
+            'Total PnL': f"${total_pnl:,.2f}",
+            'Total Fees': f"${total_fees:,.2f}",
+            'Net PnL': f"${net_pnl:,.2f}",
+            'Total Trades': total_trades,
+            'Win Rate': f"{win_rate:.2f}%",
+            'Profit Factor': f"{profit_factor:.2f}",
+            'Avg Win': f"${avg_win:,.2f}",
+            'Avg Loss': f"${avg_loss:,.2f}",
+            'Max Drawdown': f"${max_drawdown:,.2f} ({max_drawdown_pct:.2%})",
+            'Sharpe Ratio (annualized)': f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else 'N/A',
         }
-        return metrics
+
+    def calculate_sharpe_ratio(self, returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252):
+        """Calculates the annualized Sharpe ratio from a series of daily returns."""
+        if returns.std() == 0:
+            return 0.0
+
+        excess_returns = returns - (risk_free_rate / periods_per_year)
+        sharpe_ratio = (excess_returns.mean() / excess_returns.std()) * np.sqrt(periods_per_year)
+        return sharpe_ratio
 
     def print_summary(self):
         """Prints a formatted summary of the backtest results."""

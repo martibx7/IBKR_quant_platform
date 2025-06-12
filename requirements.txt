@@ -9,3 +9,4 @@ python-dotenv
 polygon-api-client
 tqdm
 mplfinance
+SQLAlchemy

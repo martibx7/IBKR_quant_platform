@@ -5,6 +5,7 @@ import pytz
 import logging
 import os
 from datetime import time
+import time as timer # Import timer for performance logging
 
 from .base import BaseStrategy
 from analytics.profiles import VolumeProfiler
@@ -17,7 +18,6 @@ class VolumeAccumulationStrategy(BaseStrategy):
     def __init__(self, symbols: list[str], ledger, **params):
         super().__init__(symbols, ledger, **params)
 
-        # --- NEW: Added price range parameters ---
         self.min_price = params.get('min_price', 5.00)
         self.max_price = params.get('max_price', 100.00)
 
@@ -42,7 +42,8 @@ class VolumeAccumulationStrategy(BaseStrategy):
         self.logger = logging.getLogger(f"{self.__class__.__name__}.{id(self)}")
         self.logger.propagate = False
         if self.logger.hasHandlers(): self.logger.handlers.clear()
-        self.logger.setLevel(logging.INFO)
+        # --- ENHANCEMENT: Set to DEBUG to see detailed logs ---
+        self.logger.setLevel(logging.DEBUG)
         fh = logging.FileHandler(log_file, mode='w')
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         fh.setFormatter(formatter)
@@ -55,7 +56,13 @@ class VolumeAccumulationStrategy(BaseStrategy):
         scan_end_date = trade_date
         scan_start_date = scan_end_date - pd.Timedelta(days=self.consolidation_days + 5)
 
-        for symbol, df in all_data.items():
+        total_symbols = len(all_data)
+        self.logger.debug(f"Scanning {total_symbols} symbols...")
+
+        for i, (symbol, df) in enumerate(all_data.items()):
+            if (i > 0) and (i % 50 == 0):
+                self.logger.debug(f"  ...scanned {i}/{total_symbols} symbols...")
+
             if df.empty: continue
 
             recent_data = df[(df.index.date >= scan_start_date) & (df.index.date <= scan_end_date)]
@@ -66,15 +73,14 @@ class VolumeAccumulationStrategy(BaseStrategy):
             last_day_data = recent_data[recent_data.index.date == scan_end_date]
             if last_day_data.empty: continue
 
-            # --- NEW: Price Filter ---
             last_close = last_day_data.iloc[-1]['Close']
             if not (self.min_price <= last_close <= self.max_price):
                 continue
-            # --- END NEW FILTER ---
 
             consolidation_days_in_data = unique_days[unique_days < pd.to_datetime(scan_end_date, utc=True)]
             if len(consolidation_days_in_data) < self.consolidation_days: continue
 
+            # --- BUG FIX: Use pandas .isin() on a pandas Index, not a numpy array ---
             consolidation_data = recent_data[recent_data.index.normalize().isin(consolidation_days_in_data)]
             if consolidation_data.empty: continue
 
@@ -107,9 +113,8 @@ class VolumeAccumulationStrategy(BaseStrategy):
             }
             self.logger.info(f"  [CANDIDATE] {symbol}: Passed all filters. POC: {poc:.2f}, SL: {consolidation_low:.2f}, PT Level: {self.candidates[symbol]['profit_target_level']:.2f}")
 
+        self.logger.debug(f"--- Scan for {trade_date.strftime('%Y-%m-%d')} complete. ---")
         return list(self.candidates.keys())
-
-    # --- on_session_start, on_bar, and other methods remain unchanged ---
 
     def on_session_start(self, session_data: dict[str, pd.DataFrame]):
         self.logger.info("--- NEW SESSION STARTED ---")
@@ -131,13 +136,13 @@ class VolumeAccumulationStrategy(BaseStrategy):
         trade = self.active_trades[symbol]
 
         if not trade.get('is_breakeven', False):
-            # Corrected breakeven logic to use profit_target_level
             profit_potential = trade['profit_target'] - trade['entry_price']
-            breakeven_trigger_price = trade['entry_price'] + (profit_potential * self.breakeven_trigger_r)
-            if bar['High'] >= breakeven_trigger_price:
-                trade['stop_loss'] = trade['entry_price']
-                trade['is_breakeven'] = True
-                self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
+            if profit_potential > 0: # Avoid division by zero
+                breakeven_trigger_price = trade['entry_price'] + (profit_potential * self.breakeven_trigger_r)
+                if bar['High'] >= breakeven_trigger_price:
+                    trade['stop_loss'] = trade['entry_price']
+                    trade['is_breakeven'] = True
+                    self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
 
         exit_price, reason = None, None
         if bar['Low'] <= trade['stop_loss']:

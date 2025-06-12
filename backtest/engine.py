@@ -5,8 +5,9 @@ import pandas as pd
 import os
 import logging
 from tqdm import tqdm
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Union
+from sqlalchemy import create_engine, text
 
 from core.ledger import BacktestLedger
 from backtest.results import BacktestResults
@@ -24,32 +25,38 @@ def camel_to_snake(name):
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
 class BacktestEngine:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, start_date: str, end_date: str):
         self.config = self._load_config(config_path)
         self.strategy_name = self.config['strategy']['name']
         self.strategy_params = self.config['strategy']['parameters'].get(self.strategy_name, {})
         self.backtest_params = self.config['backtest']
+        self.data_source_config = self.config.get('data_source', {'type': 'csv'})
         self.fee_config = self.config.get('fees', {'model': 'zero'})
+
+        self.start_date = start_date
+        self.end_date = end_date
+
+        # --- NEW: `all_data` is now populated daily, not at init ---
         self.all_data = {}
         self.session_data = {}
 
-        self._load_all_data()
+        # --- NEW: DB connection is established once and kept open ---
+        self.db_engine = None
+        if self.data_source_config.get('type') == 'sqlite':
+            db_path = self.data_source_config.get('db_path')
+            if not db_path: raise ValueError("db_path not specified in config for sqlite source.")
+            if not os.path.exists(db_path): raise FileNotFoundError(f"DB not found at {db_path}.")
+            self.db_engine = create_engine(f'sqlite:///{db_path}')
 
         self.ledger = BacktestLedger(
             initial_cash=self.backtest_params['initial_cash'],
             fee_model=self._initialize_fee_model()
         )
 
+        # --- UPDATED: Strategy is initialized before data loading ---
         self.strategy = self._initialize_strategy()
 
-        engine_logger.info("Building trading calendar...")
-        all_dates = set()
-        for symbol_data in self.all_data.values():
-            if not symbol_data.empty:
-                all_dates.update(symbol_data.index.normalize().date)
-
-        self.trading_calendar = sorted([d for d in all_dates if d.weekday() < 5])
-        engine_logger.info(f"Calendar built with {len(self.trading_calendar)} unique trading days.")
+        self._build_trading_calendar()
 
     def _load_config(self, path: str):
         with open(path, 'r') as f:
@@ -63,6 +70,7 @@ class BacktestEngine:
             return FixedFeeModel(**self.fee_config.get('fixed', {}))
         return ZeroFeeModel()
 
+    # --- UPDATED: Strategy initialization no longer depends on pre-loaded data ---
     def _initialize_strategy(self):
         strategy_module_name = camel_to_snake(self.strategy_name)
         strategy_module_path = f'strategies.{strategy_module_name}'
@@ -74,38 +82,68 @@ class BacktestEngine:
 
         self.strategy_params['tick_size'] = self.backtest_params.get('tick_size_volume_profile', 0.01)
 
-        symbols_to_use = self.strategy_params.get('symbols') or list(self.all_data.keys())
-        log_message = (f"Using specific symbols from config for {self.strategy_name}: {symbols_to_use}"
-                       if self.strategy_params.get('symbols')
-                       else f"No specific symbols in config for {self.strategy_name}. Defaulting to all {len(symbols_to_use)} loaded symbols.")
-        engine_logger.info(log_message)
+        # Note: Symbols are now passed in but data is loaded JIT
+        return strategy_class(symbols=[], ledger=self.ledger, **self.strategy_params)
 
-        return strategy_class(symbols=symbols_to_use, ledger=self.ledger, **self.strategy_params)
+    # --- NEW: Builds the calendar from the DB without loading all price data ---
+    def _build_trading_calendar(self):
+        engine_logger.info("Building trading calendar...")
+        if self.data_source_config.get('type') == 'sqlite':
+            query = "SELECT DISTINCT date(timestamp) as trade_date FROM price_data WHERE date(timestamp) BETWEEN ? AND ?"
+            dates_df = pd.read_sql(query, self.db_engine, params=(self.start_date, self.end_date))
+            self.trading_calendar = sorted([pd.to_datetime(d).date() for d in dates_df['trade_date']])
+        else: # Fallback for CSV
+            # This part remains memory-intensive for CSVs, but the primary path is now sqlite
+            temp_all_data = {}
+            data_dir = self.backtest_params['data_dir']
+            all_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
+            for filename in tqdm(all_files, desc="Building Calendar from CSVs"):
+                symbol = os.path.splitext(filename)[0]
+                df = pd.read_csv(os.path.join(data_dir, filename), usecols=['date'], parse_dates=['date'])
+                all_dates = set(df['date'].dt.date)
+            self.trading_calendar = sorted([d for d in all_dates if d.weekday() < 5])
 
-    def _load_all_data(self):
-        data_dir = self.backtest_params['data_dir']
-        all_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
-        for filename in tqdm(all_files, desc="Loading All Historical Data"):
-            symbol = os.path.splitext(filename)[0]
-            try:
-                file_path = os.path.join(data_dir, filename)
-                df = pd.read_csv(file_path, parse_dates=['date'])
-                df.columns = [col.strip().lower() for col in df.columns]
-                df = df.rename(columns={'date': 'timestamp'})
-                df.set_index(pd.to_datetime(df['timestamp'], utc=True), inplace=True)
-                df = df[['open', 'high', 'low', 'close', 'volume']]
-                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-                self.all_data[symbol] = df.apply(pd.to_numeric)
-            except Exception as e:
-                engine_logger.error(f"ERROR processing {filename}: {e}")
+        engine_logger.info(f"Calendar built with {len(self.trading_calendar)} unique trading days.")
+
+    # --- NEW: This method loads data for a small, rolling window each day ---
+    def _load_data_for_day(self, trade_date: datetime):
+        """
+        Loads data from SQLite for the specific trade_date plus a lookback period.
+        """
+        # Determine lookback needed by the strategy scanner
+        lookback_days = self.strategy_params.get('consolidation_days', 10) + 15 # Add buffer
+        lookback_start_date = trade_date - timedelta(days=lookback_days)
+
+        query = "SELECT * FROM price_data WHERE date(timestamp) BETWEEN ? AND ?"
+
+        daily_slice_df = pd.read_sql(
+            query,
+            self.db_engine,
+            index_col='timestamp',
+            parse_dates=['timestamp'],
+            params=(lookback_start_date.strftime('%Y-%m-%d'), trade_date.strftime('%Y-%m-%d'))
+        )
+
+        if daily_slice_df.empty:
+            self.all_data = {}
+            return
+
+        daily_slice_df.index = pd.to_datetime(daily_slice_df.index, utc=True)
+        daily_slice_df = daily_slice_df[['open', 'high', 'low', 'close', 'volume', 'symbol']]
+        daily_slice_df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'symbol']
+
+        self.all_data = {symbol: group.drop(columns=['symbol']) for symbol, group in daily_slice_df.groupby('symbol')}
+        self.strategy.symbols = list(self.all_data.keys()) # Update strategy symbols
 
     def _get_previous_trading_day(self, current_date_obj: datetime.date) -> Union[datetime.date, None]:
+        # ... (this method is unchanged) ...
         try:
             idx = self.trading_calendar.index(current_date_obj)
             return self.trading_calendar[idx - 1] if idx > 0 else None
         except ValueError:
             return next((d for d in reversed(self.trading_calendar) if d < current_date_obj), None)
 
+    # --- UPDATED: prepare_for_day now drives the daily data loading ---
     def prepare_for_day(self, trade_date: datetime):
         self.current_trade_date = trade_date
         engine_logger.info(f"\n--- Preparing for trade date: {trade_date.strftime('%Y-%m-%d')} ---")
@@ -115,6 +153,9 @@ class BacktestEngine:
             engine_logger.warning(f"Date {trade_date.strftime('%Y-%m-%d')} not in trading calendar. Skipping day.")
             self.session_data = {}
             return
+
+        # Load data for today + lookback period
+        self._load_data_for_day(trade_date.date())
 
         self.prev_trade_date = self._get_previous_trading_day(trade_date.date())
         if not self.prev_trade_date:
@@ -127,11 +168,15 @@ class BacktestEngine:
 
         self.session_data = {}
         for symbol in candidate_symbols:
-            symbol_data = get_session(self.all_data.get(symbol, pd.DataFrame()), trade_date.date(), "Regular")
-            if not symbol_data.empty:
-                self.session_data[symbol] = symbol_data
+            # We already have the data in self.all_data, just get today's session from it
+            if symbol in self.all_data:
+                symbol_data_full = self.all_data[symbol]
+                symbol_session_data = symbol_data_full[symbol_data_full.index.date == trade_date.date()]
+                if not symbol_session_data.empty:
+                    self.session_data[symbol] = symbol_session_data
 
     def run_session(self):
+        # ... (this method is unchanged) ...
         if not self.session_data:
             engine_logger.info(f"No session data for {self.current_trade_date.strftime('%Y-%m-%d')}. Nothing to process.")
             return
@@ -140,11 +185,9 @@ class BacktestEngine:
         self.strategy.on_session_start(self.session_data)
 
         for timestamp in tqdm(all_timestamps, desc=f"Simulating {self.current_trade_date.strftime('%Y-%m-%d')}", leave=False):
-            # --- RESTORED: This block is crucial for equity calculation and was missing. ---
             market_prices = {s: df.loc[timestamp, 'Close'] for s, df in self.session_data.items() if timestamp in df.index}
             if market_prices:
                 self.ledger._update_equity(timestamp, market_prices)
-            # --- END RESTORED BLOCK ---
 
             for sym, data in self.session_data.items():
                 if timestamp in data.index:

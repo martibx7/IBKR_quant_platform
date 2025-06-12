@@ -6,6 +6,11 @@ backtest:
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
 
+# --- Select your data source ---
+data_source:
+  type: 'sqlite' # Options: 'csv' or 'sqlite'
+  db_path: 'data/price_data.db' # Path to your SQLite database file
+
 strategy:
   # Set the active strategy here.
   name: 'VolumeAccumulationStrategy' # <--- CHANGE THIS LINE TO USE A NEW STRATEGY

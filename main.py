@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import os
 import pandas as pd
 from backtest.engine import BacktestEngine
-# --- FIX: Import BacktestResults ---
 from backtest.results import BacktestResults
 
 def get_trade_dates(start_date_str, end_date_str) -> list[datetime]:
@@ -30,32 +29,44 @@ def main():
     """
     config_path = 'config.yaml'
 
-    start_date_str = input("Enter backtest start date (YYYY-MM-DD): ")
-    end_date_str = input("Enter backtest end date (YYYY-MM-DD): ")
+    # --- FIX: Added robust input validation for dates ---
+    while True:
+        start_date_str = input("Enter backtest start date (YYYY-MM-DD): ")
+        try:
+            # Validate format
+            datetime.strptime(start_date_str, '%Y-%m-%d')
+            break
+        except ValueError:
+            print("Invalid format. Please use YYYY-MM-DD.")
+
+    while True:
+        end_date_str = input("Enter backtest end date (YYYY-MM-DD): ")
+        try:
+            # Validate format
+            datetime.strptime(end_date_str, '%Y-%m-%d')
+            break
+        except ValueError:
+            print("Invalid format. Please use YYYY-MM-DD.")
+    # --- END FIX ---
+
     trade_dates = get_trade_dates(start_date_str, end_date_str)
 
     if not trade_dates:
         print("No trading dates in the specified range.")
         return
 
-    # --- Initialize and Run the Engine ---
     engine = BacktestEngine(config_path)
 
     for trade_date in trade_dates:
         try:
             engine.prepare_for_day(trade_date)
-            # The session runs and populates the ledger inside the engine
             engine.run_session()
-
         except Exception as e:
             print(f"An error occurred on {trade_date.strftime('%Y-%m-%d')}: {e}")
             import traceback
-            traceback.print_exc() # Print full traceback for debugging
+            traceback.print_exc()
             continue
 
-    # --- FIX: Aggregate and Display Final Results from the Ledger ---
-    # After the loop, the engine's ledger is full of trades.
-    # Now, we create the results object from it.
     final_results = BacktestResults(engine.ledger)
 
     if not final_results.trade_log.empty:

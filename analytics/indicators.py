@@ -2,6 +2,8 @@
 
 import pandas as pd
 import numpy as np
+# --- UPDATED: Import the new day moving average function ---
+from .moving_averages import calculate_sma, calculate_ema, calculate_day_moving_average
 
 def calculate_vwap(df: pd.DataFrame, session: str = None) -> pd.DataFrame:
     """
@@ -11,6 +13,8 @@ def calculate_vwap(df: pd.DataFrame, session: str = None) -> pd.DataFrame:
     df = df.copy()
 
     if session:
+        # This function 'get_session' is assumed to be available in the context where this is called
+        # e.g., from analytics.profiles import get_session
         df['session'] = df.index.to_series().apply(get_session)
         df = df[df['session'] == session]
 
@@ -33,3 +37,31 @@ def calculate_vwap(df: pd.DataFrame, session: str = None) -> pd.DataFrame:
 
     # Drop the intermediate columns
     return df.drop(columns=['typical_price', 'tp_x_volume', 'cumulative_tp_x_volume', 'cumulative_volume'])
+
+
+def calculate_moving_averages(df: pd.DataFrame, field: str = 'Close', periods: list = [9, 20, 50, 200]) -> pd.DataFrame:
+    """
+    Calculates a set of Simple and Exponential Moving Averages based on minutes.
+    """
+    df_out = df.copy()
+    for period in periods:
+        df_out[f'sma_{field.lower()}_{period}m'] = calculate_sma(df_out, period, field)
+        df_out[f'ema_{field.lower()}_{period}m'] = calculate_ema(df_out, period, field)
+    return df_out
+
+def calculate_200_day_ema(df: pd.DataFrame, field: str = 'Close') -> pd.DataFrame:
+    """
+    A wrapper to calculate the 200-day EMA on minute data.
+    """
+    df_out = df.copy()
+    df_out[f'ema_{field.lower()}_200d'] = calculate_day_moving_average(df_out, days=200, field=field, ma_type='ema')
+    return df_out
+
+# --- NEW: Convenience function for the 200-day SMA on minute data ---
+def calculate_200_day_sma(df: pd.DataFrame, field: str = 'Close') -> pd.DataFrame:
+    """
+    A wrapper to calculate the 200-day SMA on minute data.
+    """
+    df_out = df.copy()
+    df_out[f'sma_{field.lower()}_200d'] = calculate_day_moving_average(df_out, days=200, field=field, ma_type='sma')
+    return df_out

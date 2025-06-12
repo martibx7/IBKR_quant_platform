@@ -1,0 +1,85 @@
+Mean Reversion with Volume Confirmation Strategy
+1. Strategy Name
+Mean Reversion with Volume Confirmation
+
+2. Core Idea
+This strategy aims to profit from temporary price deviations from a short-term moving average, combined with strong volume as confirmation of a potential reversal. The core assumption is that prices, after a significant move away from their average, tend to revert back to that average. High volume during the reversal candle indicates conviction behind the move.
+
+3. Entry Logic (Long Position Example)
+The strategy looks for opportunities to buy (go long) a stock when it has recently experienced a significant dip and shows signs of reversing upwards with strong volume.
+
+Conditions for Long Entry:
+
+Price Deviation: The current closing price of the stock is significantly below its Simple Moving Average (SMA) over a defined short period.
+
+Specifically, Current Close Price < SMA(N) - (Deviation Multiplier * ATR(M))
+
+SMA(N): N-period Simple Moving Average of the Close Price.
+
+ATR(M): M-period Average True Range, used to normalize the deviation threshold based on volatility.
+
+Deviation Multiplier: A factor to determine how far below the SMA the price must be.
+
+Reversal Candle (Confirmation): The current candlestick formation indicates a potential upward reversal.
+
+Specifically, the current bar's Close Price > Open Price (a green/upward candle).
+
+Volume Confirmation: The volume on the current bar is higher than its average volume over a recent period.
+
+Specifically, Current Volume > SMA(Volume_Period)
+
+SMA(Volume_Period): Simple Moving Average of Volume over Volume_Period.
+
+Execution:
+
+If all conditions are met on the current bar, a BUY order is placed to open a position at the Open Price of the next bar.
+
+4. Exit Logic
+Positions are exited under one of three conditions:
+
+Take Profit: The stock's price reverts back to the short-term moving average.
+
+Specifically, Current Close Price >= SMA(N) (the same SMA used for entry).
+
+Stop Loss: A fixed percentage loss from the entry price is reached.
+
+Specifically, Current Close Price <= Entry Price * (1 - Stop Loss Percentage).
+
+Time-Based Exit (End of Day): To avoid holding positions overnight, any open positions are closed near the end of the trading day.
+
+Specifically, if the current time is Exit Time (e.g., 15:50:00) or later.
+
+5. Risk Management
+Robust risk management is crucial for this strategy:
+
+Risk per Trade: A small percentage of the total portfolio equity is risked on each individual trade (e.g., 1%).
+
+Maximum Allocation: A maximum percentage of the total equity that can be allocated to a single stock position (e.g., 20%). This prevents over-concentration.
+
+Stop Loss Calculation: The initial stop loss is calculated based on a fixed percentage from the entry price.
+
+6. Strategy Parameters (Configurable in config.yaml)
+These parameters allow for easy tuning and optimization of the strategy:
+
+sma_period: Integer, period for the Simple Moving Average (e.g., 20).
+
+atr_period: Integer, period for Average True Range calculation (e.g., 14).
+
+deviation_multiplier: Float, multiplier for ATR to define the price deviation threshold (e.g., 1.5).
+
+volume_sma_period: Integer, period for the Simple Moving Average of Volume (e.g., 50).
+
+risk_per_trade_pct: Float, percentage of total equity to risk per trade (e.g., 0.01 for 1%).
+
+max_allocation_pct: Float, maximum percentage of total equity to allocate to a single position (e.g., 0.20 for 20%).
+
+stop_loss_pct: Float, percentage for stop loss from entry price (e.g., 0.015 for 1.5%).
+
+entry_time: String, time of day to attempt entry (e.g., '09:35:00').
+
+exit_time: String, time of day to exit if no other conditions met (e.g., '15:50:00').
+
+timezone: String, timezone for trading hours (e.g., 'America/New_York').
+
+7. Data Requirements
+The strategy requires historical bar data (Open, High, Low, Close, Volume) at a minute or 5-minute interval for accurate execution. Daily data is used for the candidate scanning phase.

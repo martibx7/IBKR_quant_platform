@@ -44,13 +44,20 @@ class BacktestResults:
         avg_win = winning_trades['pnl'].mean()
         avg_loss = losing_trades['pnl'].mean()
 
-        # --- UPDATED: Drawdown is calculated on the high-frequency equity curve ---
+        # --- NEW: Calculate Risk/Reward Ratio ---
+        if pd.notna(avg_loss) and avg_loss != 0:
+            risk_reward_ratio = abs(avg_win / avg_loss)
+        else:
+            # If there are no losses, R:R is infinite
+            risk_reward_ratio = float('inf')
+
+        # --- Drawdown Calculation (uses high-frequency data) ---
         self.equity_curve['peak'] = self.equity_curve['equity'].cummax()
         self.equity_curve['drawdown'] = self.equity_curve['equity'] - self.equity_curve['peak']
         max_drawdown = self.equity_curve['drawdown'].min() if not self.equity_curve['drawdown'].empty else 0
         max_drawdown_pct = (self.equity_curve['drawdown'] / self.equity_curve['peak']).min() if not self.equity_curve['drawdown'].empty else 0
 
-        # --- UPDATED: Sharpe Ratio is calculated on resampled DAILY returns ---
+        # --- Sharpe Ratio Calculation (uses resampled daily data) ---
         daily_equity = self.equity_curve['equity'].resample('D').last()
         daily_returns = daily_equity.pct_change().dropna()
         sharpe_ratio = self.calculate_sharpe_ratio(daily_returns)
@@ -66,6 +73,7 @@ class BacktestResults:
             'Profit Factor': f"{profit_factor:.2f}",
             'Avg Win': f"${avg_win:,.2f}",
             'Avg Loss': f"${avg_loss:,.2f}",
+            'Reward/Risk Ratio': f"{risk_reward_ratio:.2f}:1" if risk_reward_ratio != float('inf') else 'inf',
             'Max Drawdown': f"${max_drawdown:,.2f} ({max_drawdown_pct:.2%})",
             'Sharpe Ratio (annualized)': f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else 'N/A',
         }
@@ -107,12 +115,11 @@ class BacktestResults:
         ax1.grid(True, linestyle='--', alpha=0.6)
         ax1.legend()
 
-        ax2.fill_between(self.equity_curve.index, self.equity_curve['drawdown'] * 100, 0, color='red', alpha=0.5)
+        ax2.fill_between(self.equity_curve.index, self.equity_curve['drawdown'] * 100, 0, color='red', alpha=0.5, label='Drawdown')
         ax2.set_ylabel('Drawdown (%)')
-        ax2.set_title('Drawdown')
+        ax2.set_title('Drawdown as % of Peak Equity')
         ax2.grid(True, linestyle='--', alpha=0.6)
+        ax2.legend()
 
-        plt.xlabel('Date')
-        plt.xticks(rotation=45)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()

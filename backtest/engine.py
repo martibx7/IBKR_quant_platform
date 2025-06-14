@@ -36,11 +36,9 @@ class BacktestEngine:
         self.start_date = start_date
         self.end_date = end_date
 
-        # --- NEW: `all_data` is now populated daily, not at init ---
         self.all_data = {}
         self.session_data = {}
 
-        # --- NEW: DB connection is established once and kept open ---
         self.db_engine = None
         if self.data_source_config.get('type') == 'sqlite':
             db_path = self.data_source_config.get('db_path')
@@ -53,14 +51,28 @@ class BacktestEngine:
             fee_model=self._initialize_fee_model()
         )
 
-        # --- UPDATED: Strategy is initialized before data loading ---
+        self.available_symbols = self._get_available_symbols()
         self.strategy = self._initialize_strategy()
 
+        # --- FIX: Call the method directly without assigning its return value ---
         self._build_trading_calendar()
 
     def _load_config(self, path: str):
         with open(path, 'r') as f:
             return yaml.safe_load(f)
+
+    # --- NEW: Helper method to get all available symbols from the DB ---
+    def _get_available_symbols(self):
+        """Gets a list of all unique symbols available in the data source."""
+        if self.data_source_config.get('type') == 'sqlite':
+            engine_logger.info("Fetching available symbols from database...")
+            with self.db_engine.connect() as connection:
+                result = connection.execute(text("SELECT DISTINCT symbol FROM price_data"))
+                return [row[0] for row in result]
+        else: # Fallback for CSV
+            data_dir = self.backtest_params['data_dir']
+            return [os.path.splitext(f)[0] for f in os.listdir(data_dir) if f.endswith('.csv')]
+
 
     def _initialize_fee_model(self):
         model_name = self.fee_config.get('model', 'zero').lower()
@@ -70,7 +82,7 @@ class BacktestEngine:
             return FixedFeeModel(**self.fee_config.get('fixed', {}))
         return ZeroFeeModel()
 
-    # --- UPDATED: Strategy initialization no longer depends on pre-loaded data ---
+    # --- UPDATED: Now includes logic to read symbols from a file ---
     def _initialize_strategy(self):
         strategy_module_name = camel_to_snake(self.strategy_name)
         strategy_module_path = f'strategies.{strategy_module_name}'
@@ -82,8 +94,35 @@ class BacktestEngine:
 
         self.strategy_params['tick_size'] = self.backtest_params.get('tick_size_volume_profile', 0.01)
 
-        # Note: Symbols are now passed in but data is loaded JIT
-        return strategy_class(symbols=[], ledger=self.ledger, **self.strategy_params)
+        symbols_to_use = []
+
+        # --- UPDATED: More robust logic for handling symbol sources ---
+
+        # .get() is safer as it returns None if the key doesn't exist
+        strategy_symbols = self.strategy_params.get('symbols')
+        symbol_file = self.backtest_params.get('symbol_file')
+
+        # Priority: 1. Strategy-specific 'symbols' list, 2. Global 'symbol_file', 3. All available
+        if strategy_symbols:
+            symbols_to_use = strategy_symbols
+            engine_logger.info(f"Using specific symbols from strategy config list: {len(symbols_to_use)} symbols.")
+        elif symbol_file: # This will be false if symbol_file is None or an empty string ""
+            engine_logger.info(f"Loading symbols from global file: {symbol_file}")
+            try:
+                # Assume the file path is relative to the project root
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                full_path = os.path.join(project_root, symbol_file)
+                with open(full_path, 'r') as f:
+                    symbols_to_use = [line.strip().upper() for line in f if line.strip()]
+                engine_logger.info(f"Loaded {len(symbols_to_use)} symbols from {symbol_file}.")
+            except FileNotFoundError:
+                engine_logger.error(f"ERROR: Symbol file not found at '{full_path}'. Using all available symbols.")
+                symbols_to_use = self.available_symbols
+        else:
+            symbols_to_use = self.available_symbols
+            engine_logger.info(f"No specific symbols in config. Defaulting to all {len(symbols_to_use)} available symbols.")
+
+        return strategy_class(symbols=symbols_to_use, ledger=self.ledger, **self.strategy_params)
 
     # --- NEW: Builds the calendar from the DB without loading all price data ---
     def _build_trading_calendar(self):
@@ -108,16 +147,43 @@ class BacktestEngine:
     # --- NEW: This method loads data for a small, rolling window each day ---
     def _load_data_for_day(self, trade_date: datetime):
         """
-        Loads data from SQLite for the specific trade_date plus a lookback period.
+        Loads data from SQLite for the specific trade_date plus a lookback period,
+        pre-filtering for liquidity.
         """
-        # Determine lookback needed by the strategy scanner
-        lookback_days = self.strategy_params.get('consolidation_days', 10) + 15 # Add buffer
+        lookback_days = self.strategy_params.get('consolidation_days', 10) + 20
         lookback_start_date = trade_date - timedelta(days=lookback_days)
 
-        query = "SELECT * FROM price_data WHERE date(timestamp) BETWEEN ? AND ?"
+        min_avg_volume = self.backtest_params.get('min_avg_daily_volume', 0)
+
+        # Step 1: Find symbols that meet the liquidity criteria (this part is unchanged and correct)
+        liquid_symbols_query = """
+            SELECT symbol FROM (
+                SELECT symbol, date(timestamp) as day, SUM(volume) as daily_volume
+                FROM price_data
+                WHERE date(timestamp) BETWEEN ? AND ?
+                GROUP BY symbol, day
+            )
+            GROUP BY symbol
+            HAVING AVG(daily_volume) >= ?
+        """
+        liquid_symbols_df = pd.read_sql(
+            liquid_symbols_query,
+            self.db_engine,
+            params=(lookback_start_date.strftime('%Y-%m-%d'), trade_date.strftime('%Y-%m-%d'), min_avg_volume)
+        )
+        liquid_symbols = liquid_symbols_df['symbol'].tolist()
+
+        if not liquid_symbols:
+            self.all_data = {}
+            return
+
+        # --- FIX: Simplify the main query and filter in pandas ---
+
+        # Step 2: Fetch all price data in the date range. This is fast on an indexed DB.
+        price_data_query = "SELECT * FROM price_data WHERE date(timestamp) BETWEEN ? AND ?"
 
         daily_slice_df = pd.read_sql(
-            query,
+            price_data_query,
             self.db_engine,
             index_col='timestamp',
             parse_dates=['timestamp'],
@@ -128,12 +194,16 @@ class BacktestEngine:
             self.all_data = {}
             return
 
+        # Step 3: Use pandas' highly optimized 'isin' to filter for our liquid symbols.
+        daily_slice_df = daily_slice_df[daily_slice_df['symbol'].isin(liquid_symbols)]
+        # --- END FIX ---
+
         daily_slice_df.index = pd.to_datetime(daily_slice_df.index, utc=True)
         daily_slice_df = daily_slice_df[['open', 'high', 'low', 'close', 'volume', 'symbol']]
         daily_slice_df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'symbol']
 
         self.all_data = {symbol: group.drop(columns=['symbol']) for symbol, group in daily_slice_df.groupby('symbol')}
-        self.strategy.symbols = list(self.all_data.keys()) # Update strategy symbols
+        self.strategy.symbols = list(self.all_data.keys())
 
     def _get_previous_trading_day(self, current_date_obj: datetime.date) -> Union[datetime.date, None]:
         # ... (this method is unchanged) ...

@@ -1,10 +1,12 @@
 # config.yaml
 
 backtest:
-  initial_cash: 3000
+  initial_cash: 100000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
+  min_avg_daily_volume: 500000        # Only scan stocks with avg daily volume > 500k
+  # symbol_file: 'strategies/nasdaq_100.txt' # Commented out or leave blank to disable
 
 # --- Select your data source ---
 data_source:
@@ -17,6 +19,19 @@ strategy:
 
   # --- All strategy parameters are defined below ---
   parameters:
+
+    VolumeAccumulationStrategy:
+      log_file: 'logs/volume_accumulation.log'
+      min_price: 0.00                 # Minimum price to filter out low-value stocks
+      max_price: 10000.00             # Maximum price to filter out high-value stocks
+      consolidation_days: 10          # Number of days to look back for a consolidation range
+      consolidation_range_pct: 0.07   # Max range (as % of low) to be considered consolidation
+      breakout_volume_ratio: 1.5      # Volume must be 1.5x the average of the last 10 days
+      risk_per_trade_pct: 0.01        # Risk 1% of total equity per trade
+      profit_target_r: 1.5            # Profit target is 1.5x the risk
+      breakeven_trigger_r: 0.75       # Move SL to breakeven when 75% of PT is reached
+      timezone: 'America/New_York'
+
     OpenRejectionReverseStrategy:
       profile_type: 'volume' # Choose 'volume' or 'market' for the profiler
       log_file: 'logs/open_rejection_reverse.log'
@@ -42,19 +57,6 @@ strategy:
       daily_change_threshold: 0.10
       position_size_pct: 0.01
       r_unit_pct: 0.02
-
-    VolumeAccumulationStrategy:
-      log_file: 'logs/volume_accumulation.log'
-      min_price: 2.00                 # Minimum price to filter out low-value stocks
-      max_price: 100.00               # Maximum price to filter out high-value stocks
-      consolidation_days: 10          # Number of days to look back for a consolidation range
-      consolidation_range_pct: 0.07   # Max range (as % of low) to be considered consolidation
-      breakout_volume_ratio: 1.5      # Volume must be 1.5x the average of the last 10 days
-      risk_per_trade_pct: 0.01        # Risk 1% of total equity per trade
-      profit_target_r: 1.5            # Profit target is 1.5x the risk
-      breakeven_trigger_r: 0.75       # Move SL to breakeven when 75% of PT is reached
-      timezone: 'America/New_York'
-
 
     ValueMigrationStrategy:
       log_file: 'logs/value_migration.log'

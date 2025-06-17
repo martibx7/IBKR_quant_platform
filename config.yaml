@@ -1,12 +1,12 @@
 # config.yaml
 
 backtest:
-  initial_cash: 100000
+  initial_cash: 3000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
-  min_avg_daily_volume: 500000        # Only scan stocks with avg daily volume > 500k
-  # symbol_file: 'strategies/nasdaq_100.txt' # Commented out or leave blank to disable
+  min_avg_daily_volume: 200000        # Only scan stocks with avg daily volume > 500k
+  # symbol_file: 'strategies/sp_500.txt' # Commented out or leave blank to disable
 
 # --- Select your data source ---
 data_source:
@@ -22,8 +22,8 @@ strategy:
 
     VolumeAccumulationStrategy:
       log_file: 'logs/volume_accumulation.log'
-      min_price: 0.00                 # Minimum price to filter out low-value stocks
-      max_price: 10000.00             # Maximum price to filter out high-value stocks
+      min_price: 2.00                 # Minimum price to filter out low-value stocks
+      max_price: 100.00             # Maximum price to filter out high-value stocks
       consolidation_days: 10          # Number of days to look back for a consolidation range
       consolidation_range_pct: 0.07   # Max range (as % of low) to be considered consolidation
       breakout_volume_ratio: 1.5      # Volume must be 1.5x the average of the last 10 days
@@ -31,6 +31,14 @@ strategy:
       profit_target_r: 1.5            # Profit target is 1.5x the risk
       breakeven_trigger_r: 0.75       # Move SL to breakeven when 75% of PT is reached
       timezone: 'America/New_York'
+
+    ConsolidationScreenerStrategy:
+      log_file: 'logs/consolidation_screener.log'
+      min_price: 2.00
+      max_price: 100.00
+      consolidation_days: 10
+      consolidation_range_pct: 0.07   # Use your desired value here
+      breakout_volume_ratio: 1.5      # Use your desired value here
 
     OpenRejectionReverseStrategy:
       profile_type: 'volume' # Choose 'volume' or 'market' for the profiler

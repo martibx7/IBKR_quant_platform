@@ -5,115 +5,121 @@ import pytz
 import logging
 import os
 from datetime import time
-import time as timer # Import timer for performance logging
 
 from .base import BaseStrategy
 from analytics.profiles import VolumeProfiler
 
 class VolumeAccumulationStrategy(BaseStrategy):
     """
-    Identifies multi-day consolidations with high-volume breakouts within a specific price range,
-    and enters on a re-test of the consolidation's Point of Control (POC) after confirmation.
+    Identifies multi-day consolidations with high-volume breakouts, and enters on a
+    re-test of the consolidation's Point of Control (POC) after confirmation.
+    This version uses a highly optimized and robust vectorized candidate scan.
     """
     def __init__(self, symbols: list[str], ledger, **params):
         super().__init__(symbols, ledger, **params)
-
+        self.params = params
         self.min_price = params.get('min_price', 5.00)
         self.max_price = params.get('max_price', 100.00)
-
         self.consolidation_days = params.get('consolidation_days', 10)
         self.consolidation_range_pct = params.get('consolidation_range_pct', 0.07)
         self.breakout_volume_ratio = params.get('breakout_volume_ratio', 1.5)
         self.risk_per_trade_pct = params.get('risk_per_trade_pct', 0.01)
         self.profit_target_r = params.get('profit_target_r', 1.5)
         self.breakeven_trigger_r = params.get('breakeven_trigger_r', 0.75)
-
         self.timezone = pytz.timezone(params.get('timezone', 'America/New_York'))
         self.tick_size = params.get('tick_size', 0.01)
-
         self.candidates = {}
         self.active_trades = {}
         self.current_prices = {}
-
-        self._setup_logger(params.get('log_file', 'logs/volume_accumulation.log'))
+        self._setup_logger(params.get('log_file', 'logs/volume_accumulation_strategy.log'))
 
     def _setup_logger(self, log_file):
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
         self.logger = logging.getLogger(f"{self.__class__.__name__}.{id(self)}")
         self.logger.propagate = False
         if self.logger.hasHandlers(): self.logger.handlers.clear()
-        # --- ENHANCEMENT: Set to DEBUG to see detailed logs ---
         self.logger.setLevel(logging.DEBUG)
         fh = logging.FileHandler(log_file, mode='w')
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         fh.setFormatter(formatter)
         self.logger.addHandler(fh)
 
-    def scan_for_candidates(self, all_data: dict[str, pd.DataFrame], trade_date: pd.Timestamp) -> list[str]:
-        self.logger.info(f"--- SCANNING CANDIDATES FOR {trade_date.strftime('%Y-%m-%d')} ---")
+    def scan_for_candidates(self, all_data: dict[str, pd.DataFrame], scan_date: pd.Timestamp) -> list[str]:
+        self.logger.info(f"--- VECTORIZED SCAN FOR {scan_date.strftime('%Y-%m-%d')} ---")
         self.candidates.clear()
 
-        scan_end_date = trade_date
-        scan_start_date = scan_end_date - pd.Timedelta(days=self.consolidation_days + 5)
+        if not all_data: return []
 
-        total_symbols = len(all_data)
-        self.logger.debug(f"Scanning {total_symbols} symbols...")
+        all_symbols_df = pd.concat(all_data.values(), keys=all_data.keys(), names=['symbol', 'timestamp_utc'])
+        self.logger.debug(f"Combined DataFrame created with {len(all_symbols_df)} rows for {len(all_symbols_df.index.get_level_values('symbol').unique())} symbols.")
 
-        for i, (symbol, df) in enumerate(all_data.items()):
-            if (i > 0) and (i % 50 == 0):
-                self.logger.debug(f"  ...scanned {i}/{total_symbols} symbols...")
+        start_of_scan_day = pd.to_datetime(scan_date, utc=True)
+        end_of_scan_day = start_of_scan_day + pd.Timedelta(days=1)
+        ts_index = all_symbols_df.index.get_level_values('timestamp_utc')
 
-            if df.empty: continue
+        breakout_day_data = all_symbols_df[(ts_index >= start_of_scan_day) & (ts_index < end_of_scan_day)]
+        if breakout_day_data.empty: return []
 
-            recent_data = df[(df.index.date >= scan_start_date) & (df.index.date <= scan_end_date)]
-            unique_days = recent_data.index.normalize().unique()
+        last_closes = breakout_day_data.groupby('symbol')['Close'].last()
+        breakout_volumes = breakout_day_data.groupby('symbol')['Volume'].sum()
 
-            if len(unique_days) < self.consolidation_days: continue
+        consolidation_df = all_symbols_df[ts_index < start_of_scan_day]
+        if consolidation_df.empty: return []
 
-            last_day_data = recent_data[recent_data.index.date == scan_end_date]
-            if last_day_data.empty: continue
+        grouped_consol = consolidation_df.groupby('symbol')
+        consol_high = grouped_consol['High'].max()
+        consol_low = grouped_consol['Low'].min()
+        consol_range_pct = (consol_high - consol_low) / consol_low
 
-            last_close = last_day_data.iloc[-1]['Close']
-            if not (self.min_price <= last_close <= self.max_price):
-                continue
+        # --- LOGICAL FIX: Use nunique() for a precise day count ---
+        unique_days_count = grouped_consol['date'].nunique().clip(1)
+        consol_avg_volume = grouped_consol['Volume'].sum() / unique_days_count
 
-            consolidation_days_in_data = unique_days[unique_days < pd.to_datetime(scan_end_date, utc=True)]
-            if len(consolidation_days_in_data) < self.consolidation_days: continue
+        metrics_df = pd.DataFrame({
+            'last_close': last_closes,
+            'breakout_volume': breakout_volumes,
+            'consol_high': consol_high,
+            'consol_low': consol_low,
+            'consol_range_pct': consol_range_pct,
+            'consol_avg_volume': consol_avg_volume
+        })
+        self.logger.debug(f"Initial metrics DataFrame created with shape: {metrics_df.shape}")
 
-            # --- BUG FIX: Use pandas .isin() on a pandas Index, not a numpy array ---
-            consolidation_data = recent_data[recent_data.index.normalize().isin(consolidation_days_in_data)]
-            if consolidation_data.empty: continue
+        metrics_df.dropna(inplace=True)
+        self.logger.debug(f"Metrics DataFrame shape after dropna(): {metrics_df.shape}")
 
-            consolidation_high = consolidation_data['High'].max()
-            consolidation_low = consolidation_data['Low'].min()
+        if metrics_df.empty:
+            self.logger.info("No symbols had complete data for all required metrics.")
+            return []
 
-            if not consolidation_low > 0 or (consolidation_high - consolidation_low) / consolidation_low > self.consolidation_range_pct:
-                continue
+        price_mask = (metrics_df['last_close'] >= self.min_price) & (metrics_df['last_close'] <= self.max_price)
+        consolidation_mask = metrics_df['consol_range_pct'] < self.consolidation_range_pct
+        volume_mask = metrics_df['breakout_volume'] > (metrics_df['consol_avg_volume'] * self.breakout_volume_ratio)
+        breakout_mask = metrics_df['last_close'] > metrics_df['consol_high']
 
-            if last_close <= consolidation_high:
-                continue
+        self.logger.debug(f"Price mask hits: {price_mask.sum()}")
+        self.logger.debug(f"Consolidation mask hits: {consolidation_mask.sum()}")
+        self.logger.debug(f"Volume mask hits: {volume_mask.sum()}")
+        self.logger.debug(f"Breakout mask hits: {breakout_mask.sum()}")
 
-            avg_consolidation_volume = consolidation_data['Volume'].sum() / len(consolidation_data.index.normalize().unique())
-            breakout_volume = last_day_data['Volume'].sum()
+        final_mask = price_mask & consolidation_mask & volume_mask & breakout_mask
+        final_candidate_symbols = metrics_df[final_mask].index.tolist()
 
-            if avg_consolidation_volume > 0 and breakout_volume < (avg_consolidation_volume * self.breakout_volume_ratio):
-                continue
+        self.logger.info(f"Vectorized scan found {len(final_candidate_symbols)} candidates.")
 
+        for symbol in final_candidate_symbols:
+            symbol_consol_data = consolidation_df.loc[symbol]
             profiler = VolumeProfiler(self.tick_size)
-            profile = profiler.calculate(consolidation_data)
+            profile = profiler.calculate(symbol_consol_data)
 
-            if not profile or profile.get('poc_price') is None: continue
+            if profile and profile.get('poc_price') is not None:
+                self.candidates[symbol] = {
+                    'poc': profile['poc_price'],
+                    'stop_loss': metrics_df.loc[symbol, 'consol_low'],
+                    'status': 'watching'
+                }
 
-            poc = profile['poc_price']
-            self.candidates[symbol] = {
-                'poc': poc,
-                'stop_loss': consolidation_low,
-                'status': 'watching',
-                'profit_target_level': last_day_data['High'].max()
-            }
-            self.logger.info(f"  [CANDIDATE] {symbol}: Passed all filters. POC: {poc:.2f}, SL: {consolidation_low:.2f}, PT Level: {self.candidates[symbol]['profit_target_level']:.2f}")
-
-        self.logger.debug(f"--- Scan for {trade_date.strftime('%Y-%m-%d')} complete. ---")
+        self.logger.info(f"Processed POC for {len(self.candidates)} valid candidates.")
         return list(self.candidates.keys())
 
     def on_session_start(self, session_data: dict[str, pd.DataFrame]):
@@ -136,25 +142,23 @@ class VolumeAccumulationStrategy(BaseStrategy):
         trade = self.active_trades[symbol]
 
         if not trade.get('is_breakeven', False):
-            profit_potential = trade['profit_target'] - trade['entry_price']
-            if profit_potential > 0: # Avoid division by zero
-                breakeven_trigger_price = trade['entry_price'] + (profit_potential * self.breakeven_trigger_r)
-                if bar['High'] >= breakeven_trigger_price:
-                    trade['stop_loss'] = trade['entry_price']
-                    trade['is_breakeven'] = True
-                    self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
+            breakeven_trigger_price = trade['entry_price'] + (trade['risk_per_share'] * self.breakeven_trigger_r)
+            if bar['High'] >= breakeven_trigger_price:
+                trade['stop_loss'] = trade['entry_price']
+                trade['is_breakeven'] = True
+                self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
 
         exit_price, reason = None, None
         if bar['Low'] <= trade['stop_loss']:
             exit_price, reason = trade['stop_loss'], "Stop Loss"
-        elif bar['High'] >= trade['profit_target']:
+        elif bar['High'] >= trade.get('profit_target', float('inf')):
             exit_price, reason = trade['profit_target'], "Profit Target"
         elif bar.name.time() >= time(15, 50):
             exit_price, reason = bar['Close'], "End of Day"
 
         if exit_price:
             self.logger.info(f"  [EXIT] {symbol} @ {exit_price:.2f} ({reason})")
-            self.ledger.record_trade(bar.name, symbol, trade['quantity'], exit_price, 'SELL', self.current_prices)
+            self.ledger.record_trade(bar.name, symbol, trade['quantity'], exit_price, 'SELL', self.current_prices, exit_reason=reason)
             del self.active_trades[symbol]
 
     def _handle_candidate(self, symbol: str, bar: pd.Series):
@@ -168,23 +172,17 @@ class VolumeAccumulationStrategy(BaseStrategy):
         elif candidate['status'] == 'triggered' and bar['High'] > candidate['confirmation_high']:
             entry_price = candidate['confirmation_high']
             stop_loss_price = candidate['stop_loss']
-            profit_target_price = candidate['profit_target_level']
             risk_per_share = entry_price - stop_loss_price
 
-            if risk_per_share <= 0 or entry_price >= profit_target_price:
+            if risk_per_share <= 0:
                 del self.candidates[symbol]
                 return
+
+            profit_target_price = entry_price + (risk_per_share * self.profit_target_r)
 
             equity = self.ledger.get_total_equity(self.current_prices)
             dollar_risk = equity * self.risk_per_trade_pct
             quantity = int(dollar_risk / risk_per_share)
-
-            cost = quantity * entry_price
-            available_cash = self.ledger.cash
-            if cost > available_cash:
-                new_quantity = int(available_cash / entry_price)
-                self.logger.info(f"  [SCALE DOWN] {symbol}: Not enough cash for {quantity} shares. Scaling down to {new_quantity}.")
-                quantity = new_quantity
 
             if quantity == 0:
                 del self.candidates[symbol]
@@ -199,8 +197,6 @@ class VolumeAccumulationStrategy(BaseStrategy):
                     'quantity': quantity,
                     'risk_per_share': risk_per_share
                 }
-                self.logger.info(f"    -> Trade logged: Qty {quantity} @ {entry_price:.2f}, SL {stop_loss_price:.2f}, PT {profit_target_price:.2f}")
-
             del self.candidates[symbol]
 
     def on_session_end(self):

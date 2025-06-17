@@ -10,3 +10,5 @@ polygon-api-client
 tqdm
 mplfinance
 SQLAlchemy
+openpyxl
+snakeviz

@@ -66,6 +66,12 @@ def main():
     if not final_results.trade_log.empty:
         print("\n--- Backtest Run Complete ---")
         final_results.print_summary()
+
+        # --- NEW: Save the trade log to an Excel file ---
+        log_filename = f"logs/trade_log_{engine.strategy_name}_{start_date_str}_to_{end_date_str}.xlsx"
+        final_results.save_trade_log_to_excel(log_filename)
+        # --- END NEW ---
+
         final_results.plot_equity_curve()
     else:
         print("\nBacktest run finished, but no trades were executed.")

@@ -2,107 +2,127 @@
 
 import pandas as pd
 import os
-import sqlite3
+import sqlalchemy
 from sqlalchemy import create_engine, text
 from tqdm import tqdm
 import yaml
 
-def get_data_dir_from_config(project_root: str) -> str:
+# You can tune this number based on your system's RAM.
+# Higher numbers are faster but use more memory. 100 is a safe starting point.
+CHUNK_SIZE = 500
+
+def get_db_engine(config: dict):
+    """Creates a SQLAlchemy engine from the config file."""
+    db_config = config['database']
+    db_type = db_config['type']
+
+    if db_type == 'postgresql':
+        conn_str = (
+            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+            f"@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
+        )
+        return create_engine(conn_str)
+    elif db_type == 'sqlite':
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_path = os.path.join(project_root, db_config.get('db_path', 'data/price_data.db'))
+        return create_engine(f"sqlite:///{db_path}")
+    else:
+        raise ValueError(f"Unsupported database type: {db_type}")
+
+def process_and_write_chunk(df_list: list, engine):
     """
-    Reads the data directory path from the project's config file.
+    Concatenates a list of dataframes and writes the chunk to the database,
+    using a safe chunksize depending on the database dialect.
     """
-    config_path = os.path.join(project_root, 'config.yaml')
-    try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        # Navigate through the config structure to find the data_dir
-        return config.get('backtest', {}).get('data_dir', 'data/historical')
-    except FileNotFoundError:
-        print(f"Warning: config.yaml not found at '{config_path}'. Using default 'data/historical'.")
-        return 'data/historical'
+    if not df_list:
+        return
+
+    master_chunk_df = pd.concat(df_list, ignore_index=True)
+
+    # Clean up duplicates within the chunk
+    master_chunk_df.set_index('timestamp', inplace=True)
+    master_chunk_df = master_chunk_df[~master_chunk_df.index.duplicated(keep='first')]
+    master_chunk_df.reset_index(inplace=True)
+    master_chunk_df = master_chunk_df[['timestamp', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']]
+
+    # --- FIX APPLIED HERE ---
+    # Use a large chunksize for PostgreSQL for high performance, and a smaller,
+    # safe chunksize for SQLite to stay under its parameter limit.
+    db_chunk_size = 5000 if engine.dialect.name == 'postgresql' else 120
+
+    master_chunk_df.to_sql(
+        'price_data',
+        con=engine,
+        if_exists='append',
+        index=False,
+        method='multi',
+        chunksize=db_chunk_size
+    )
 
 def main():
     """
     Main function to orchestrate the database population process.
+    Uses chunking to balance memory usage and speed.
     """
-    print("--- Database Population Tool ---")
+    print("--- Database Population Tool (Chunk-Optimized) ---")
 
-    # Determine project root assuming this script is in the 'tools' folder
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    print(f"Project root identified as: {project_root}")
+    config_path = os.path.join(project_root, 'config.yaml')
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
 
-    # Get data directory from config and set database path
-    relative_data_dir = get_data_dir_from_config(project_root)
-    data_dir = os.path.join(project_root, relative_data_dir)
-    db_path = os.path.join(project_root, 'data', 'price_data.db')
+    data_dir = os.path.join(project_root, config['backtest']['data_dir'])
+    engine = get_db_engine(config)
 
-    # Delete the existing database to ensure a clean, optimized build
-    if os.path.exists(db_path):
-        print(f"Deleting existing database at {db_path} to rebuild with new schema.")
-        os.remove(db_path)
+    print(f"Connecting to {config['database']['type']} database...")
 
-    print(f"Data directory: {data_dir}")
-    print(f"Database will be created at: {db_path}")
+    with engine.connect() as connection:
+        print("Dropping existing 'price_data' table for a clean import...")
+        connection.execute(text("DROP TABLE IF EXISTS price_data;"))
+        connection.commit()
 
-    if not os.path.isdir(data_dir):
-        print(f"Error: Data directory not found at '{data_dir}'")
-        return
-
-    # Set up the database engine
-    engine = create_engine(f'sqlite:///{db_path}')
     all_files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
-
     if not all_files:
         print("No CSV files found to process.")
         return
 
-    print(f"Found {len(all_files)} CSV files to import.")
+    print(f"Found {len(all_files)} CSV files. Processing in chunks of {CHUNK_SIZE}...")
 
-    # Process each CSV file and load it into the database
-    for filename in tqdm(all_files, desc="Populating Database"):
+    chunk_dfs = []
+    for filename in tqdm(all_files, desc="Processing files"):
         symbol = os.path.splitext(filename)[0]
         file_path = os.path.join(data_dir, filename)
-
         try:
-            # Load and standardize the data
             df = pd.read_csv(file_path, parse_dates=['date'])
             df.columns = [col.strip().lower() for col in df.columns]
             df = df.rename(columns={'date': 'timestamp'})
-
-            # --- PERFORMANCE OPTIMIZATION ---
-            # Create a dedicated 'date' column in text format ('YYYY-MM-DD')
-            # This is the key change for dramatically faster daily lookups.
             df['date'] = df['timestamp'].dt.strftime('%Y-%m-%d')
-            # --- END OPTIMIZATION ---
-
             df['symbol'] = symbol
+            chunk_dfs.append(df)
 
-            # Remove duplicate timestamps for data integrity
-            df.set_index('timestamp', inplace=True)
-            df = df[~df.index.duplicated(keep='first')]
-            df.reset_index(inplace=True)
+            if len(chunk_dfs) >= CHUNK_SIZE:
+                process_and_write_chunk(chunk_dfs, engine)
+                chunk_dfs.clear()
 
-            # Ensure a consistent column order
-            df = df[['timestamp', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']]
-
-            # Append the processed data to the SQL table
-            df.to_sql(
-                'price_data',
-                con=engine,
-                if_exists='append',
-                index=False
-            )
         except Exception as e:
             print(f"\nError processing {filename}: {e}")
 
-    print("Creating optimized index for faster queries... (This may take a moment)")
+    if chunk_dfs:
+        process_and_write_chunk(chunk_dfs, engine)
+
+    print("\nCreating optimized index for faster queries...")
     with engine.connect() as connection:
-        # Create a new, more efficient index on the date and symbol columns
         connection.execute(text("CREATE INDEX IF NOT EXISTS idx_date_symbol ON price_data (date, symbol);"))
         connection.commit()
 
+    # --- FIX APPLIED HERE ---
+    # For PostgreSQL, VACUUM must run outside a transaction block (in autocommit mode).
+    if engine.dialect.name == 'postgresql':
+        print("Optimizing table statistics for PostgreSQL...")
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(text("VACUUM ANALYZE price_data;"))
+
     print("\n--- Database population complete! ---")
-    print("IMPORTANT: To realize the speed benefits, you must now update your backtest engine's query to use this new 'date' column for lookups.")
 
 if __name__ == '__main__':
     main()

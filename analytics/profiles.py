@@ -8,6 +8,7 @@ import string
 from collections import defaultdict
 
 def get_session_times(session_name: str) -> tuple[time, time]:
+    """Returns the start and end times for a given session name."""
     session_defs = {
         'pre-market':  (time(4, 0),  time(9, 30)),
         'regular':     (time(9, 30), time(16, 0)),
@@ -15,20 +16,27 @@ def get_session_times(session_name: str) -> tuple[time, time]:
     }
     return session_defs.get(session_name.lower(), (None, None))
 
-def get_session(df: pd.DataFrame, target_date: datetime.date,
-                session_name: str, tz: str = 'America/New_York') -> pd.DataFrame:
+def get_session(df: pd.DataFrame, target_date: datetime.date, session_name: str, tz_str: str = 'America/New_York') -> pd.DataFrame:
+    """
+    Filters a DataFrame for a specific trading session on a given date.
+    """
     if df.empty:
-        return df
-    start_t, end_t = get_session_times(session_name)
-    if not start_t or not end_t:
         return pd.DataFrame()
-    if isinstance(tz, str):
-        tz = pytz.timezone(tz)
-    start_dt = tz.localize(datetime.combine(target_date, start_t))
-    end_dt   = tz.localize(datetime.combine(target_date, end_t))
+
+    start_time, end_time = get_session_times(session_name)
+    if not start_time or not end_time:
+        return pd.DataFrame()
+
+    timezone = pytz.timezone(tz_str)
+    start_dt = timezone.localize(datetime.combine(target_date, start_time))
+    end_dt = timezone.localize(datetime.combine(target_date, end_time))
     return df[(df.index >= start_dt) & (df.index < end_dt)]
 
+
 class VolumeProfiler:
+    """
+    Calculates a Volume Profile using a fast, vectorized algorithm.
+    """
     def __init__(self, tick_size: float):
         self.tick_size = tick_size
 
@@ -86,6 +94,9 @@ class VolumeProfiler:
         return self._calculate_distribution(df)
 
 class MarketProfiler:
+    """
+    Calculates a comprehensive Market Profile (TPO) using a vectorized approach.
+    """
     def __init__(self, tick_size: float = 0.05):
         self.tick_size   = tick_size
         self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
@@ -93,55 +104,78 @@ class MarketProfiler:
     def calculate(self, df: pd.DataFrame) -> dict | None:
         if df.empty or not isinstance(df.index, pd.DatetimeIndex):
             return None
-        tpo = self._calculate_tpo_profile_by_interval(df)
-        if not tpo:
+
+        tpo_series = self._calculate_tpo_profile_vectorized(df)
+
+        if tpo_series is None or tpo_series.empty:
             return None
-        poc, vah, val = self._calculate_poc_and_value_area(tpo)
+
+        profile_dict = tpo_series.to_dict()
+        poc, vah, val = self._calculate_poc_and_value_area(profile_dict)
+
         return {'poc_price': poc, 'value_area_high': vah, 'value_area_low': val}
 
-    def _calculate_tpo_profile_by_interval(self, df: pd.DataFrame) -> defaultdict:
-        profile = defaultdict(list)
-        start   = df.index[0].floor('30min')
-        for i, letter in enumerate(self.tpo_periods):
-            period_start = start + pd.Timedelta(minutes=30 * i)
-            period_end   = period_start + pd.Timedelta(minutes=30)
-            bars = df[(df.index >= period_start) & (df.index < period_end)]
-            if bars.empty:
-                if period_start > df.index[-1]:
-                    break
-                continue
-            for _, row in bars.iterrows():
-                lo = int(row['low']  / self.tick_size)
-                hi = int(row['high'] / self.tick_size)
-                for t in range(lo, hi + 1):
-                    price = round(t * self.tick_size, 8)
-                    if letter not in profile[price]:
-                        profile[price].append(letter)
-        return profile
+    def _calculate_tpo_profile_vectorized(self, df: pd.DataFrame):
+        """Calculates the TPO profile using a vectorized approach."""
+        start_time = df.index[0].floor('30min')
+        time_deltas_seconds = (df.index - start_time).total_seconds()
+        period_indices = (time_deltas_seconds / 1800).astype(int)
 
-    def _calculate_poc_and_value_area(self, profile: defaultdict) -> tuple:
-        if not profile:
-            return (None, None, None)
+        period_indices = np.clip(period_indices, 0, len(self.tpo_periods) - 1)
+
+        df = df.assign(tpo_letter=np.array(self.tpo_periods)[period_indices])
+
+        df = df.assign(
+            low_tick=(df['low'] / self.tick_size).astype(int),
+            high_tick=(df['high'] / self.tick_size).astype(int)
+        )
+
+        records = [
+            {'tick': tick, 'tpo': row.tpo_letter}
+            for row in df.itertuples()
+            for tick in range(row.low_tick, row.high_tick + 1)
+        ]
+
+        if not records: return None
+        exploded_df = pd.DataFrame.from_records(records)
+        tpo_profile = exploded_df.drop_duplicates().groupby('tick')['tpo'].apply(list)
+        if tpo_profile.empty: return None
+
+        tpo_profile.index = np.round(tpo_profile.index * self.tick_size, 8)
+        return tpo_profile
+
+    def _calculate_poc_and_value_area(self, profile: dict) -> tuple:
+        """Calculates POC and Value Area from a profile dictionary."""
+        if not profile: return (None, None, None)
+
         counts = pd.Series({p: len(v) for p, v in profile.items()})
         poc    = counts.idxmax()
         total  = counts.sum()
         target = total * 0.7
         current = counts[poc]
         prices = [poc]
-        above = counts[counts.index > poc].index
-        below = counts[counts.index < poc].sort_values(ascending=False).index
+
+        above_poc = counts.index[counts.index > poc]
+        below_poc = counts.index[counts.index < poc]
+
+        sorted_above = counts.loc[above_poc].sort_index()
+        sorted_below = counts.loc[below_poc].sort_index(ascending=False)
+
+        len_above, len_below = len(sorted_above), len(sorted_below)
         ia, ib = 0, 0
-        while current < target:
-            va = counts.get(above[ia], -1) if ia < len(above) else -1
-            vb = counts.get(below[ib], -1) if ib < len(below) else -1
-            if va == -1 and vb == -1:
-                break
-            if va > vb:
-                current += va
-                prices.append(above[ia])
+        while current < target and (ia < len_above or ib < len_below):
+            price_a = sorted_above.index[ia] if ia < len_above else None
+            price_b = sorted_below.index[ib] if ib < len_below else None
+
+            if price_a is not None and (price_b is None or (abs(price_a - poc) < abs(price_b - poc))):
+                current += sorted_above.iloc[ia]
+                prices.append(price_a)
                 ia += 1
-            else:
-                current += vb
-                prices.append(below[ib])
+            elif price_b is not None:
+                current += sorted_below.iloc[ib]
+                prices.append(price_b)
                 ib += 1
+            else:
+                break
+
         return poc, max(prices), min(prices)

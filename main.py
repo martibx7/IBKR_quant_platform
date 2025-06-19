@@ -44,26 +44,25 @@ def main():
     # Initialize the engine once
     engine = BacktestEngine(config_path, start_date=start_date_str, end_date=end_date_str)
 
-    # Use the calendar built by the engine
-    trade_dates = engine.trading_calendar
-    if not trade_dates:
-        logging.warning("No trading dates found in the specified range. Exiting.")
-        return
-
     # Use the engine's main run loop for a cleaner implementation
     print("\nStarting backtest...")
-    final_results = engine.run()
+    # --- FIX: engine.run() returns the ledger, which we pass to BacktestResults ---
+    final_ledger = engine.run()
 
-    if final_results and not final_results.trade_log.empty:
+    # Wrap the returned ledger in the results class
+    results = BacktestResults(final_ledger)
+
+    if results and not results.trade_log.empty:
         print("\n--- Backtest Run Complete ---")
-        final_results.print_summary()
+        results.print_summary()
 
         log_dir = "logs"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
         log_filename = f"{log_dir}/trade_log_{engine.strategy_name}_{start_date_str}_to_{end_date_str}.xlsx"
-        final_results.save_trade_log(log_filename)
+        # Call the method on the results object
+        results.save_trade_log_to_excel(log_filename)
         print(f"Trade log saved to '{log_filename}'")
     else:
         print("Backtest complete. No trades were executed.")

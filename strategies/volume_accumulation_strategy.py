@@ -3,27 +3,34 @@
 import pandas as pd
 import pytz
 import logging
+from datetime import time
 
-from .base import BaseStrategy
+from strategies.base import BaseStrategy
 from analytics.profiles import VolumeProfiler
 
 class VolumeAccumulationStrategy(BaseStrategy):
+    """
+    Identifies multi-day consolidations with high-volume breakouts, and enters on a
+    re-test of the consolidation's Point of Control (POC) after confirmation.
+    """
     def __init__(self, symbols: list[str], ledger, config: dict, **params):
         super().__init__(symbols, ledger, config, **params)
-        self.min_price            = self.params.get('min_price', 5.00)
-        self.max_price            = self.params.get('max_price', 100.00)
-        self.consol_days          = self.params.get('consolidation_days', 10)
-        self.consol_range_pct     = self.params.get('consolidation_range_pct', 0.07)
-        self.breakout_vol_ratio   = self.params.get('breakout_volume_ratio', 1.5)
-        self.risk_pct             = self.params.get('risk_per_trade_pct', 0.01)
-        self.profit_target_r      = self.params.get('profit_target_r', 1.5)
-        self.breakeven_trigger_r  = self.params.get('breakeven_trigger_r', 0.75)
-        self.timezone             = pytz.timezone(self.params.get('timezone', 'America/New_York'))
-        self.tick_size            = self.config['backtest'].get('tick_size_volume_profile', 0.01)
-        self.candidates           = {}
+        self.min_price               = self.params.get('min_price', 5.00)
+        self.max_price               = self.params.get('max_price', 100.00)
+        self.consolidation_days      = self.params.get('consolidation_days', 10)
+        self.consolidation_range_pct = self.params.get('consolidation_range_pct', 0.07)
+        self.breakout_volume_ratio   = self.params.get('breakout_volume_ratio', 1.5)
+        self.risk_per_trade_pct      = self.params.get('risk_per_trade_pct', 0.01)
+        self.max_allocation_pct      = self.params.get('max_allocation_pct', 0.25)
+        self.profit_target_r         = self.params.get('profit_target_r', 1.5)
+        self.breakeven_trigger_r     = self.params.get('breakeven_trigger_r', 0.75)
+        self.timezone                = pytz.timezone(self.params.get('timezone', 'America/New_York'))
+        self.tick_size               = self.config['backtest'].get('tick_size_volume_profile', 0.01)
+        self.candidates              = {}
 
     def get_required_lookback(self) -> int:
-        return self.consol_days + 5
+        # If testing for 0 consolidation days, we still need at least 1 day for volume comparison.
+        return max(1, self.consolidation_days)
 
     def on_new_day(self, trade_date: pd.Timestamp, data: dict[str, pd.DataFrame]):
         super().on_new_day(trade_date, data)
@@ -34,136 +41,141 @@ class VolumeAccumulationStrategy(BaseStrategy):
         if not self.data_for_day:
             return
 
-        # merge all symbols
-        df_all = pd.concat(self.data_for_day.values(), copy=False)
-        if df_all.empty:
-            return
+        self.candidates.clear()
 
-        df_all['dt'] = df_all.index.date
-        bd = scan_date.date()
-        today   = df_all[df_all['dt'] == bd]
-        prior   = df_all[df_all['dt'] <  bd]
-        if today.empty or prior.empty:
-            return
+        breakout_date = scan_date.tz_convert('UTC').date()
 
-        # aggregate on lowercase cols
-        last_close      = today.groupby('symbol')['close'].last()
-        breakout_vol    = today.groupby('symbol')['volume'].sum()
-        avg_vol         = prior.groupby('symbol')['volume'].mean()
-        grp             = prior.groupby('symbol')
-        chigh           = grp['high'].max()
-        clow            = grp['low'].min()
-        crange_pct      = (chigh - clow) / clow
+        for symbol, df in self.data_for_day.items():
+            day_data = df[df.index.date == breakout_date]
+            # Use all data before the breakout day for the lookback period
+            consol_data = df[df.index.date < breakout_date]
 
-        metrics = pd.DataFrame({
-            'last_close':     last_close,
-            'breakout_vol':   breakout_vol,
-            'avg_vol':        avg_vol,
-            'consol_high':    chigh,
-            'consol_low':     clow,
-            'consol_range':   crange_pct
-        }).dropna()
+            if day_data.empty: continue
 
-        if metrics.empty:
-            return
+            # --- Filter by price first ---
+            last_close = day_data['close'].iloc[-1]
+            if not self.min_price <= last_close <= self.max_price: continue
 
-        mask_price = metrics['last_close'].between(self.min_price, self.max_price)
-        mask_range = metrics['consol_range'] <= self.consol_range_pct
-        mask_vol   = metrics['breakout_vol'] > metrics['avg_vol'] * self.breakout_vol_ratio
-        mask_break = metrics['last_close'] > metrics['consol_high']
-        picks      = metrics[mask_price & mask_range & mask_vol & mask_break].index.tolist()
+            # --- NEW: Logic for handling both consolidation and no-consolidation tests ---
+            is_candidate = False
+            poc_data = pd.DataFrame()
+            stop_loss_price = 0
 
-        self.logger.info(f"Found {len(picks)} raw candidates.")
-        if not picks:
-            return
+            if self.consolidation_days == 0:
+                # --- NO-CONSOLIDATION LOGIC: Look for a simple volume spike ---
+                if consol_data.empty: continue # Need at least one prior day
 
-        prof = VolumeProfiler(self.tick_size)
-        valid = 0
-        for sym in picks:
-            df_prior = prior[prior['symbol'] == sym]
-            profile  = prof.calculate(df_prior)
-            if profile:
-                self.candidates[sym] = {
-                    'status':            'identified',
-                    'poc':               profile['poc_price'],
-                    'vah':               profile['value_area_high'],
-                    'val':               profile['value_area_low'],
-                    'confirm_high':      0.0,
-                    'stop_loss':         0.0,
-                }
-                valid += 1
+                prev_day_volume = consol_data[consol_data.index.date == consol_data.index.date.max()]['volume'].sum()
+                current_day_volume = day_data['volume'].sum()
 
-        self.logger.info(f"Profiled {valid} candidates.")
+                if prev_day_volume > 0 and current_day_volume > (prev_day_volume * self.breakout_volume_ratio):
+                    is_candidate = True
+                    poc_data = day_data # Use today's data for POC
+                    stop_loss_price = day_data['low'].min()
+            else:
+                # --- STANDARD CONSOLIDATION LOGIC ---
+                if consol_data.empty: continue
+
+                # Check for sufficient historical days for a valid consolidation
+                if len(consol_data.index.date.unique()) < self.consolidation_days: continue
+
+                consol_high = consol_data['high'].max()
+                consol_low = consol_data['low'].min()
+                if consol_low == 0: continue
+
+                consol_range_pct = (consol_high - consol_low) / consol_low
+                if consol_range_pct > self.consolidation_range_pct: continue
+
+                breakout_volume = day_data['volume'].sum()
+                avg_daily_volume = consol_data.groupby(consol_data.index.date)['volume'].sum().mean()
+
+                if breakout_volume <= (avg_daily_volume * self.breakout_volume_ratio): continue
+
+                if last_close > consol_high:
+                    is_candidate = True
+                    poc_data = consol_data # Use consolidation data for POC
+                    stop_loss_price = consol_low
+
+            # If any logic path found a candidate, calculate its profile
+            if is_candidate:
+                profiler = VolumeProfiler(self.tick_size)
+                profile = profiler.calculate(poc_data)
+                if profile:
+                    self.candidates[symbol] = {
+                        'status': 'watching',
+                        'poc': profile['poc_price'],
+                        'stop_loss': stop_loss_price,
+                    }
+
+        self.logger.info(f"Scan found {len(self.candidates)} valid candidates.")
 
     def on_bar(self, symbol: str, bar: pd.Series):
         super().on_bar(symbol, bar)
-        if symbol in self.candidates and symbol not in self.active_trades:
-            self._maybe_enter(symbol, bar)
         if symbol in self.active_trades:
-            self._check_exit(symbol, bar)
+            self._manage_active_trade(symbol, bar)
+        elif symbol in self.candidates:
+            self._handle_candidate(symbol, bar)
 
-    def _maybe_enter(self, sym: str, bar: pd.Series):
-        c = self.candidates[sym]
-        if c['status'] == 'identified' and bar['low'] <= c['poc']:
-            c['status']       = 'triggered'
-            c['confirm_high'] = bar['high']
-            c['stop_loss']    = bar['low']
-            self.logger.info(f"[SETUP] {sym} hit POC {c['poc']:.2f}")
-        elif c['status'] == 'triggered' and bar['high'] > c['confirm_high']:
-            entry = c['confirm_high']
-            sl    = c['stop_loss']
-            rps   = entry - sl
-            if rps <= 0:
-                del self.candidates[sym]
+    def _handle_candidate(self, symbol: str, bar: pd.Series):
+        candidate = self.candidates.get(symbol)
+        if not candidate: return
+
+        if candidate['status'] == 'watching' and bar['low'] <= candidate['poc']:
+            candidate['status'] = 'triggered'
+            candidate['confirmation_high'] = bar['high']
+            self.logger.info(f"  [SETUP] {symbol} touched POC {candidate['poc']:.2f}. Waiting for confirmation above {bar['high']:.2f}.")
+
+        elif candidate['status'] == 'triggered' and bar['high'] > candidate['confirmation_high']:
+            entry_price = candidate['confirmation_high']
+            stop_loss_price = candidate['stop_loss']
+            risk_per_share = entry_price - stop_loss_price
+
+            if risk_per_share <= 0:
+                if symbol in self.candidates: del self.candidates[symbol]
                 return
-            target = entry + rps * self.profit_target_r
-            equity = self.ledger.get_total_equity(self.current_prices)
-            risk   = equity * self.risk_pct
-            qty    = int(risk / rps)
-            if qty > 0:
-                self.logger.info(f"[ENTRY] {sym} @ {entry:.2f}")
-                if self.ledger.record_trade(bar.name, sym, qty, entry, 'BUY', self.current_prices):
-                    self.active_trades[sym] = {
-                        'entry_price': entry,
-                        'stop_loss':   sl,
-                        'profit_target': target,
-                        'quantity':    qty,
-                        'r_per_share': rps,
-                        'breakeven':   False
-                    }
-            del self.candidates[sym]
 
-    def _check_exit(self, sym: str, bar: pd.Series):
-        t = self.active_trades[sym]
-        # stop
-        if bar['low'] <= t['stop_loss']:
-            self.logger.info(f"[EXIT] {sym} SL @ {t['stop_loss']:.2f}")
-            self.ledger.close_trade(bar.name, sym, t['stop_loss'], 'Stop Loss', self.current_prices)
-            del self.active_trades[sym]
-            return
-        # profit target
-        if bar['high'] >= t['profit_target']:
-            self.logger.info(f"[EXIT] {sym} PT @ {t['profit_target']:.2f}")
-            self.ledger.close_trade(bar.name, sym, t['profit_target'], 'Profit Target', self.current_prices)
-            del self.active_trades[sym]
-            return
-        # breakeven
-        if not t['breakeven']:
-            be = t['entry_price'] + t['r_per_share'] * self.breakeven_trigger_r
-            if bar['high'] >= be:
-                t['stop_loss'] = t['entry_price']
-                t['breakeven'] = True
-                self.logger.info(f"[BREAKEVEN] {sym} SL -> {t['entry_price']:.2f}")
+            equity = self.ledger.get_total_equity(self.current_prices)
+            dollar_risk = equity * self.risk_per_trade_pct
+            quantity = int(dollar_risk / risk_per_share) if risk_per_share > 0 else 0
+
+            if quantity > 0:
+                self.logger.info(f"  [ENTRY] {symbol}: Confirmed above {entry_price:.2f}.")
+                if self.ledger.record_trade(bar.name, symbol, quantity, entry_price, 'BUY', self.current_prices):
+                    profit_target_price = entry_price + (risk_per_share * self.profit_target_r)
+                    self.active_trades[symbol] = {
+                        'entry_price': entry_price,
+                        'stop_loss': stop_loss_price,
+                        'profit_target': profit_target_price,
+                        'quantity': quantity,
+                        'risk_per_share': risk_per_share
+                    }
+            if symbol in self.candidates:
+                del self.candidates[symbol]
+
+    def _manage_active_trade(self, symbol: str, bar: pd.Series):
+        trade = self.active_trades.get(symbol)
+        if not trade: return
+
+        if not trade.get('is_breakeven', False):
+            breakeven_trigger_price = trade['entry_price'] + (trade['risk_per_share'] * self.breakeven_trigger_r)
+            if bar['high'] >= breakeven_trigger_price:
+                trade['stop_loss'] = trade['entry_price']
+                trade['is_breakeven'] = True
+                self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
+
+        exit_price, reason = None, None
+        if bar['low'] <= trade['stop_loss']:
+            exit_price, reason = trade['stop_loss'], "Stop Loss"
+        elif bar['high'] >= trade.get('profit_target', float('inf')):
+            exit_price, reason = trade['profit_target'], "Profit Target"
+        elif bar.name.time() >= time(15, 50):
+            exit_price, reason = bar['close'], "End of Day"
+
+        if exit_price and reason:
+            self.logger.info(f"  [EXIT] {symbol} @ {exit_price:.2f} ({reason})")
+            self.ledger.record_trade(bar.name, symbol, trade['quantity'], exit_price, 'SELL', self.current_prices, exit_reason=reason)
+            if symbol in self.active_trades:
+                del self.active_trades[symbol]
 
     def on_session_end(self):
-        if not self.active_trades:
-            return
-        for sym in list(self.active_trades):
-            df = self.data_for_day.get(sym)
-            if df is not None and not df.empty:
-                last = df.iloc[-1]
-                ep   = last['close']
-                tm   = last.name
-                self.logger.info(f"[EOD EXIT] {sym} @ {ep:.2f}")
-                self.ledger.close_trade(tm, sym, ep, 'EOD', self.current_prices)
-                del self.active_trades[sym]
+        pass

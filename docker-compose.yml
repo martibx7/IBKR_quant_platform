@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: ibkr_quant_db
+    restart: always
+    environment:
+      - POSTGRES_USER=quantuser
+      - POSTGRES_PASSWORD=quantpassword
+      - POSTGRES_DB=quant_platform
+    ports:
+      - '5433:5432' # Exposes the database port to your local machine
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data # Persists data on your local disk
+
+volumes:
+  postgres_data:

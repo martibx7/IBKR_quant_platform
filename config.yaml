@@ -5,13 +5,20 @@ backtest:
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
-  min_avg_daily_volume: 200000        # Only scan stocks with avg daily volume > 500k
+  min_avg_daily_volume: 0        # Only scan stocks with avg daily volume > 500k
   # symbol_file: 'strategies/sp_500.txt' # Commented out or leave blank to disable
 
 # --- Select your data source ---
-data_source:
-  type: 'sqlite' # Options: 'csv' or 'sqlite'
-  db_path: 'data/price_data.db' # Path to your SQLite database file
+database:
+  type: 'sqlite' # 'postgresq' or 'sqlite'
+  # --- PostgreSQL Settings ---
+  host: 'localhost'
+  port: 5433
+  user: 'quantuser'
+  password: 'quantpassword'
+  dbname: 'quant_platform'
+  # --- SQLite Settings ---
+  db_path: 'data/price_data.db' # Use this if type is 'sqlite'
 
 strategy:
   # Set the active strategy here.
@@ -21,10 +28,11 @@ strategy:
   parameters:
 
     VolumeAccumulationStrategy:
+      # symbols: ['GLW']
       log_file: 'logs/volume_accumulation.log'
       min_price: 2.00                 # Minimum price to filter out low-value stocks
       max_price: 100.00             # Maximum price to filter out high-value stocks
-      consolidation_days: 10          # Number of days to look back for a consolidation range
+      consolidation_days: 0          # Number of days to look back for a consolidation range
       consolidation_range_pct: 0.07   # Max range (as % of low) to be considered consolidation
       breakout_volume_ratio: 1.5      # Volume must be 1.5x the average of the last 10 days
       risk_per_trade_pct: 0.01        # Risk 1% of total equity per trade

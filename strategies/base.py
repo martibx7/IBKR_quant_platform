@@ -5,7 +5,6 @@ import pandas as pd
 import logging
 import os
 
-# --- CORRECTED IMPORT ---
 from core.ledger import BacktestLedger
 
 class BaseStrategy(ABC):
@@ -26,12 +25,10 @@ class BaseStrategy(ABC):
         logger = logging.getLogger(self.__class__.__name__)
         log_file = self.params.get('log_file')
         if log_file:
-            # Ensure logs directory exists
             log_dir = os.path.dirname(log_file)
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir)
 
-            # Remove old handler if it exists
             for handler in logger.handlers[:]:
                 if isinstance(handler, logging.FileHandler) and handler.baseFilename.endswith(log_file):
                     logger.removeHandler(handler)
@@ -42,8 +39,8 @@ class BaseStrategy(ABC):
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)
 
-        logger.setLevel(logging.INFO) # Default level
-        # Prevent logging from propagating to the root logger
+        # --- FIX: Set level to DEBUG to capture all log messages ---
+        logger.setLevel(logging.DEBUG)
         logger.propagate = False
         return logger
 
@@ -71,7 +68,7 @@ class BaseStrategy(ABC):
         """
         Called for each new bar of data for a specific symbol.
         """
-        self.current_prices[symbol] = bar['Close']
+        self.current_prices[symbol] = bar['close']
 
     def on_session_end(self):
         """

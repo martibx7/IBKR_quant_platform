@@ -1,186 +1,238 @@
-# strategies/volume_accumulation_strategy.py
+# backtest/engine.py
 
 import pandas as pd
-import pytz
+from sqlalchemy import create_engine, text
 import logging
-from datetime import time
+import pytz
+from tqdm import tqdm
+from importlib import import_module
+import yaml
+import os
+import re
 
-from strategies.base import BaseStrategy
-from analytics.profiles import VolumeProfiler
+from core.ledger import BacktestLedger
+from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
 
-class VolumeAccumulationStrategy(BaseStrategy):
-    """
-    Identifies multi-day consolidations with high-volume breakouts, and enters on a
-    re-test of the consolidation's Point of Control (POC) after confirmation.
-    """
-    def __init__(self, symbols: list[str], ledger, config: dict, **params):
-        super().__init__(symbols, ledger, config, **params)
-        self.min_price               = self.params.get('min_price', 5.00)
-        self.max_price               = self.params.get('max_price', 100.00)
-        self.consolidation_days      = self.params.get('consolidation_days', 10)
-        self.consolidation_range_pct = self.params.get('consolidation_range_pct', 0.07)
-        self.breakout_volume_ratio   = self.params.get('breakout_volume_ratio', 1.5)
-        self.risk_per_trade_pct      = self.params.get('risk_per_trade_pct', 0.01)
-        self.profit_target_r         = self.params.get('profit_target_r', 1.5)
-        self.breakeven_trigger_r     = self.params.get('breakeven_trigger_r', 0.75)
-        self.timezone                = pytz.timezone(self.params.get('timezone', 'America/New_York'))
-        self.tick_size               = self.config['backtest'].get('tick_size_volume_profile', 0.01)
-        self.candidates              = {}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+engine_logger = logging.getLogger(__name__)
 
-    def get_required_lookback(self) -> int:
-        return self.consolidation_days + 5
+def get_db_engine(config: dict):
+    """Creates a SQLAlchemy engine from the config file."""
+    db_config = config['database']
+    db_type = db_config['type']
 
-    def on_new_day(self, trade_date: pd.Timestamp, data: dict[str, pd.DataFrame]):
-        super().on_new_day(trade_date, data)
-        self.logger.info(f"--- VECTORIZED SCAN FOR {trade_date.date()} ---")
-        self.scan_for_candidates(trade_date)
+    if db_type == 'postgresql':
+        conn_str = (
+            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+            f"@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
+        )
+        return create_engine(conn_str)
+    elif db_type == 'sqlite':
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        db_path = os.path.join(project_root, db_config.get('db_path', 'data/price_data.db'))
+        return create_engine(f"sqlite:///{db_path}")
+    else:
+        raise ValueError(f"Unsupported database type: {db_type}")
 
-    def scan_for_candidates(self, scan_date: pd.Timestamp):
-        if not self.data_for_day:
-            return
+def camel_to_snake(name):
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
-        # concatenate all symbols' intraday bars
-        all_symbols_df = pd.concat(self.data_for_day.values())
-        if all_symbols_df.empty:
-            return
+class BacktestEngine:
+    def __init__(self, config_path: str, start_date: str, end_date: str):
+        self.config = self._load_config(config_path)
+        self.strategy_name = self.config['strategy']['name']
+        self.backtest_params = self.config['backtest']
+        self.fee_config = self.config.get('fees', {'model': 'zero'})
 
-        # assign date and split into consolidation vs breakout day
-        all_symbols_df['date_obj'] = all_symbols_df.index.date
-        breakout_date   = scan_date.date()
-        day_data        = all_symbols_df[all_symbols_df['date_obj'] == breakout_date]
-        consol_data     = all_symbols_df[all_symbols_df['date_obj'] < breakout_date]
+        self.start_dt = pd.Timestamp(start_date, tz='America/New_York')
+        self.end_dt = pd.Timestamp(end_date, tz='America/New_York')
 
-        if day_data.empty or consol_data.empty:
-            return
+        self.db_engine = get_db_engine(self.config)
 
-        # compute per-symbol metrics on uppercase columns
-        last_closes       = day_data.groupby('symbol')['Close'].last()
-        breakout_volumes  = day_data.groupby('symbol')['Volume'].sum()
-        avg_volumes       = consol_data.groupby('symbol')['Volume'].mean()
-        grp_consol        = consol_data.groupby('symbol')
-        consol_high       = grp_consol['High'].max()
-        consol_low        = grp_consol['Low'].min()
-        consol_range_pct  = (consol_high - consol_low) / consol_low
+        # --- FIX: Re-implement the liquidity filter from the old engine ---
+        self.symbols = self._get_liquid_symbols()
 
-        metrics = pd.DataFrame({
-            'last_close':      last_closes,
-            'breakout_volume': breakout_volumes,
-            'avg_volume':      avg_volumes,
-            'consol_high':     consol_high,
-            'consol_low':      consol_low,
-            'consol_range':    consol_range_pct
-        }).dropna()
+        self.ledger = BacktestLedger(
+            initial_cash=self.backtest_params['initial_cash'],
+            fee_model=self._initialize_fee_model()
+        )
 
-        if metrics.empty:
-            return
+        self.strategy = self._initialize_strategy()
+        self.trading_calendar = self._get_trade_dates()
+        self.current_prices = {}
 
-        # apply your filters
-        price_mask        = metrics['last_close'].between(self.min_price, self.max_price)
-        consolidation_ok  = metrics['consol_range'] <= self.consolidation_range_pct
-        volume_ok         = metrics['breakout_volume'] > metrics['avg_volume'] * self.breakout_volume_ratio
-        breakout_above    = metrics['last_close'] > metrics['consol_high']
-        final_mask        = price_mask & consolidation_ok & volume_ok & breakout_above
+    def _get_liquid_symbols(self) -> list[str]:
+        """
+        Performs a one-time query to get a universe of symbols that meet
+        the minimum average daily volume requirement from the config.
+        """
+        min_vol = self.backtest_params.get('min_avg_daily_volume', 0)
+        if not min_vol: # If no minimum is set, get all symbols
+            with self.db_engine.connect() as connection:
+                result = connection.execute(text("SELECT DISTINCT symbol FROM price_data"))
+                return [row[0] for row in result]
 
-        candidates = metrics[final_mask].index.tolist()
-        self.logger.info(f"Vectorized scan found {len(candidates)} candidates.")
+        engine_logger.info(f"Filtering for symbols with avg daily volume >= {min_vol}...")
 
-        if not candidates:
-            return
+        # Use a lookback period before the start date for a realistic liquidity assessment
+        lookback_start = (self.start_dt - pd.Timedelta(days=60)).date().isoformat()
+        lookback_end = (self.start_dt - pd.Timedelta(days=1)).date().isoformat()
 
-        # calculate POC/VAH/VAL for each candidate
-        profiler = VolumeProfiler(self.tick_size)
-        valid = 0
-        for sym in candidates:
-            sym_consol = consol_data[consol_data['symbol'] == sym]
-            profile = profiler.calculate(sym_consol)
-            if profile:
-                self.candidates[sym] = {
-                    'status':             'identified',
-                    'poc':                profile['poc_price'],
-                    'vah':                profile['value_area_high'],
-                    'val':                profile['value_area_low'],
-                    'confirmation_high':  0,
-                    'stop_loss':          0,
-                }
-                valid += 1
+        query = text("""
+            SELECT symbol
+            FROM (
+                SELECT symbol, date, SUM(volume) as daily_volume
+                FROM price_data
+                WHERE date BETWEEN :start AND :end
+                GROUP BY symbol, date
+            ) AS daily_volumes
+            GROUP BY symbol
+            HAVING AVG(daily_volume) >= :min_vol
+        """)
 
-        self.logger.info(f"Processed POC for {valid} valid candidates.")
+        with self.db_engine.connect() as connection:
+            result = connection.execute(query, {'start': lookback_start, 'end': lookback_end, 'min_vol': min_vol})
+            liquid_symbols = [row[0] for row in result]
 
-    def on_bar(self, symbol: str, bar: pd.Series):
-        super().on_bar(symbol, bar)
-        if symbol in self.candidates and symbol not in self.active_trades:
-            self._handle_candidate_entry(symbol, bar)
-        if symbol in self.active_trades:
-            self.on_exit_conditions(symbol, bar)
+        engine_logger.info(f"Found {len(liquid_symbols)} liquid symbols to backtest.")
+        return liquid_symbols
 
-    def _handle_candidate_entry(self, symbol: str, bar: pd.Series):
-        c = self.candidates[symbol]
-        if c['status'] == 'identified' and bar['Low'] <= c['poc']:
-            c['status'] = 'triggered'
-            c['confirmation_high'] = bar['High']
-            c['stop_loss'] = bar['Low']
-            self.logger.info(f"  [SETUP] {symbol} touched POC {c['poc']:.2f}. Waiting above {bar['High']:.2f}.")
-        elif c['status'] == 'triggered' and bar['High'] > c['confirmation_high']:
-            entry  = c['confirmation_high']
-            sl     = c['stop_loss']
-            r_ps   = entry - sl
-            if r_ps <= 0:
-                del self.candidates[symbol]
-                return
-            target = entry + r_ps * self.profit_target_r
-            equity = self.ledger.get_total_equity(self.current_prices)
-            risk   = equity * self.risk_per_trade_pct
-            qty    = int(risk / r_ps)
-            if qty > 0:
-                self.logger.info(f"  [ENTRY] {symbol} @ {entry:.2f}")
-                if self.ledger.record_trade(bar.name, symbol, qty, entry, 'BUY', self.current_prices):
-                    self.active_trades[symbol] = {
-                        'entry_price':       entry,
-                        'stop_loss':         sl,
-                        'profit_target':     target,
-                        'quantity':          qty,
-                        'risk_per_share':    r_ps,
-                        'breakeven_triggered': False
-                    }
-            del self.candidates[symbol]
+    def _load_config(self, path: str):
+        with open(path, 'r') as f:
+            return yaml.safe_load(f)
 
-    def on_exit_conditions(self, symbol: str, bar: pd.Series):
-        t = self.active_trades.get(symbol)
-        if not t:
-            return
+    def _initialize_fee_model(self):
+        model_name = self.fee_config.get('model', 'zero').lower()
+        if model_name == 'tiered':
+            return TieredIBFeeModel(**self.fee_config.get('tiered', {}))
+        elif model_name == 'fixed':
+            return FixedFeeModel(**self.fee_config.get('fixed', {}))
+        return ZeroFeeModel()
 
-        # stop‐loss
-        if bar['Low'] <= t['stop_loss']:
-            self.logger.info(f"  [EXIT] {symbol} @ {t['stop_loss']:.2f} (Stop Loss)")
-            self.ledger.close_trade(bar.name, symbol, t['stop_loss'], "Stop Loss", self.current_prices)
-            del self.active_trades[symbol]
-            return
+    def _initialize_strategy(self):
+        strategy_module_name = camel_to_snake(self.strategy_name)
+        strategy_module_path = f'strategies.{strategy_module_name}'
+        try:
+            strategy_module = import_module(strategy_module_path)
+            strategy_class = getattr(strategy_module, self.strategy_name)
+        except (ImportError, AttributeError) as e:
+            raise ImportError(f"Could not find strategy '{self.strategy_name}' in '{strategy_module_path}.py'. Error: {e}")
 
-        # profit‐target
-        if bar['High'] >= t['profit_target']:
-            self.logger.info(f"  [EXIT] {symbol} @ {t['profit_target']:.2f} (Profit Target)")
-            self.ledger.close_trade(bar.name, symbol, t['profit_target'], "Profit Target", self.current_prices)
-            del self.active_trades[symbol]
-            return
+        all_strategy_params = self.config['strategy'].get('parameters', {})
+        active_strategy_params = all_strategy_params.get(self.strategy_name, {})
 
-        # move to breakeven
-        if not t['breakeven_triggered']:
-            be_price = t['entry_price'] + t['risk_per_share'] * self.breakeven_trigger_r
-            if bar['High'] >= be_price:
-                t['stop_loss'] = t['entry_price']
-                t['breakeven_triggered'] = True
-                self.logger.info(f"  [BREAKEVEN] {symbol} stop moved to {t['entry_price']:.2f}")
+        # Determine which symbols to use: the list from the config OR the full liquid list.
+        symbols_to_use = active_strategy_params.get('symbols') or self.symbols
+        self.symbols = symbols_to_use # Update the engine's list of symbols
 
-    def on_session_end(self):
-        """Exit any open trades at the last bar's Close."""
-        if not self.active_trades:
-            return
+        # --- FIX APPLIED HERE ---
+        # Remove 'symbols' from the params dict if it exists to prevent passing it twice.
+        active_strategy_params.pop('symbols', None)
 
-        for sym in list(self.active_trades):
-            if sym in self.data_for_day and not self.data_for_day[sym].empty:
-                last = self.data_for_day[sym].iloc[-1]
-                exit_price = last['Close']
-                exit_time  = last.name
-                self.logger.info(f"  [EXIT] {sym} @ {exit_price:.2f} (EOD)")
-                self.ledger.close_trade(exit_time, sym, exit_price, "End of Day", self.current_prices)
-                del self.active_trades[sym]
+        # Now, `**active_strategy_params` will not contain a conflicting 'symbols' key.
+        return strategy_class(
+            symbols=symbols_to_use,
+            ledger=self.ledger,
+            config=self.config,
+            **active_strategy_params
+        )
+
+    def _get_trade_dates(self) -> list[pd.Timestamp]:
+        query = text("SELECT DISTINCT date FROM price_data WHERE date BETWEEN :start AND :end ORDER BY date;")
+        with self.db_engine.connect() as conn:
+            dates_df = pd.read_sql(query, conn, params={'start': self.start_dt.date().isoformat(), 'end': self.end_dt.date().isoformat()})
+
+        trade_dates = pd.to_datetime(dates_df['date']).dt.tz_localize('America/New_York')
+        return trade_dates.tolist()
+
+    def _load_data_for_day(self, trade_date: pd.Timestamp, lookback_trading_days: int) -> dict[str, pd.DataFrame]:
+        """
+        Smartly loads data for the current trade_date plus the N previous *trading* days.
+        """
+        if not self.symbols:
+            return {}
+
+        with self.db_engine.connect() as conn:
+            # Step 1: Find the exact dates of the last N trading days before the current trade_date.
+            trading_dates_query = text("""
+                SELECT DISTINCT date
+                FROM price_data
+                WHERE date < :trade_date
+                ORDER BY date DESC
+                LIMIT :n_days
+            """)
+
+            lookback_dates_df = pd.read_sql(
+                trading_dates_query,
+                conn,
+                params={'trade_date': trade_date.date().isoformat(), 'n_days': lookback_trading_days}
+            )
+
+            if lookback_dates_df.empty:
+                return {} # Not enough historical data to proceed
+
+            # Create the final list of dates to fetch (lookback dates + current trade date)
+            dates_to_fetch = lookback_dates_df['date'].tolist() + [trade_date.date().isoformat()]
+
+            # Step 2: Fetch the market data for only those specific dates.
+            in_params_symbols = {f"sym_{i}": sym for i, sym in enumerate(self.symbols)}
+            in_params_dates = {f"d_{i}": dt for i, dt in enumerate(dates_to_fetch)}
+
+            placeholders_symbols = ", ".join(f":{key}" for key in in_params_symbols)
+            placeholders_dates = ", ".join(f":{key}" for key in in_params_dates)
+
+            query = text(
+                f"SELECT timestamp, symbol, open, high, low, close, volume FROM price_data "
+                f"WHERE symbol IN ({placeholders_symbols}) AND date IN ({placeholders_dates})"
+            )
+
+            params = {**in_params_symbols, **in_params_dates}
+            df = pd.read_sql(query, conn, params=params, parse_dates=['timestamp'])
+
+        if df.empty: return {}
+
+        # Localize or convert timestamps to UTC to match the strategy's expectation
+        if df['timestamp'].dt.tz is None:
+            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+        else:
+            df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
+
+        df.set_index('timestamp', inplace=True)
+        df.columns = [col.lower() for col in df.columns]
+
+        return {sym: sym_df for sym, sym_df in df.groupby('symbol')}
+
+    def run(self):
+        engine_logger.info(f"Starting backtest from {self.start_dt.date()} to {self.end_dt.date()}...")
+        lookback = self.strategy.get_required_lookback()
+
+        for trade_date in tqdm(self.trading_calendar, desc="Running Backtest"):
+            self.ledger.settle_funds()
+
+            daily_data_with_lookback = self._load_data_for_day(trade_date, lookback)
+            if not daily_data_with_lookback: continue
+
+            self.strategy.on_new_day(trade_date, daily_data_with_lookback)
+
+            bars_for_today = {}
+            for sym, df in daily_data_with_lookback.items():
+                today_df = df[df.index.date == trade_date.date()]
+                if not today_df.empty:
+                    bars_for_today[sym] = today_df
+
+            if not bars_for_today: continue
+
+            all_bars_today = pd.concat(bars_for_today.values()).sort_index()
+
+            for timestamp, bar in all_bars_today.iterrows():
+                symbol = bar['symbol']
+                self.current_prices[symbol] = bar['close']
+                self.strategy.on_bar(symbol, bar)
+
+            self.strategy.on_session_end()
+            if not all_bars_today.empty:
+                self.ledger._update_equity(all_bars_today.index[-1], self.current_prices)
+
+        engine_logger.info("Backtest finished.")
+        return self.ledger

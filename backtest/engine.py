@@ -77,8 +77,6 @@ class BacktestEngine:
         lookback_start = (self.start_dt - pd.Timedelta(days=365)).date().isoformat()
         lookback_end = (self.start_dt - pd.Timedelta(days=1)).date().isoformat()
 
-        # NOTE: This query uses `date::date` for PostgreSQL. For SQLite, you would use `date(date)`.
-        # A more robust solution would adapt the query to the db_type.
         query = text("""
             SELECT symbol
             FROM (
@@ -190,8 +188,13 @@ class BacktestEngine:
 
             self.strategy.on_session_end()
             if not all_bars_today.empty:
-                # --- BUG FIX APPLIED HERE ---
                 self.ledger._update_equity(all_bars_today.index[-1], self.strategy.current_prices)
+
+        # --- THIS IS THE NEWLY ADDED BLOCK ---
+        # Generate summary report at the end of the backtest
+        if hasattr(self.strategy, 'generate_report'):
+            self.strategy.generate_report()
+        # --- END OF NEW BLOCK ---
 
         engine_logger.info("Backtest finished.")
         return self.ledger

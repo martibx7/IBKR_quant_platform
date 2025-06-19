@@ -1,7 +1,7 @@
 # config.yaml
 
 backtest:
-  initial_cash: 3000
+  initial_cash: 100000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
@@ -31,12 +31,12 @@ strategy:
     VolumeAccumulationStrategy:
       # symbols: ['GLW']
       log_file: 'logs/volume_accumulation.log'
-      min_price: 1.00                 # Minimum price to filter out low-value stocks
-      max_price: 1000.00             # Maximum price to filter out high-value stocks
-      consolidation_days: 10          # Number of days to look back for a consolidation range
+      min_price: 2.00                 # Minimum price to filter out low-value stocks
+      max_price: 2000.00             # Maximum price to filter out high-value stocks
+      consolidation_days: 10         # Number of days to look back for a consolidation range
       volume_lookback_days: 10
-      consolidation_range_pct: 0.07   # Max range (as % of low) to be considered consolidation
-      breakout_volume_ratio: 1.5      # Volume must be 1.5x the average of the last 10 days
+      consolidation_range_pct: 0.15   # Max range (as % of low) to be considered consolidation
+      breakout_volume_ratio: 2      # Volume must be 1.5x the average of the last 10 days
       risk_per_trade_pct: 0.01        # Risk 1% of total equity per trade
       profit_target_r: 1.5            # Profit target is 1.5x the risk
       breakeven_trigger_r: 0.75       # Move SL to breakeven when 75% of PT is reached

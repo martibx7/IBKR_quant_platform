@@ -13,7 +13,6 @@ import re
 from core.ledger import BacktestLedger
 from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
 
-# --- FIX: Added the missing logger definition ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 engine_logger = logging.getLogger(__name__)
 
@@ -75,17 +74,17 @@ class BacktestEngine:
                 return [row[0] for row in result]
 
         engine_logger.info(f"Filtering for symbols with avg daily volume >= {min_vol}...")
-
-        # --- FIX: Look back a full year for a more stable liquidity assessment ---
         lookback_start = (self.start_dt - pd.Timedelta(days=365)).date().isoformat()
         lookback_end = (self.start_dt - pd.Timedelta(days=1)).date().isoformat()
 
+        # NOTE: This query uses `date::date` for PostgreSQL. For SQLite, you would use `date(date)`.
+        # A more robust solution would adapt the query to the db_type.
         query = text("""
             SELECT symbol
             FROM (
                 SELECT symbol, date, SUM(volume) as daily_volume
                 FROM price_data
-                WHERE date::date BETWEEN :start AND :end
+                WHERE date BETWEEN :start AND :end
                 GROUP BY symbol, date
             ) AS daily_volumes
             GROUP BY symbol
@@ -93,7 +92,6 @@ class BacktestEngine:
         """)
 
         with self.db_engine.connect() as connection:
-            # Note: The 'date::date' cast is for PostgreSQL compatibility
             result = connection.execute(query, {'start': lookback_start, 'end': lookback_end, 'min_vol': min_vol})
             liquid_symbols = [row[0] for row in result]
 
@@ -144,33 +142,22 @@ class BacktestEngine:
         return pd.to_datetime(dates_df['date']).dt.tz_localize('America/New_York').tolist()
 
     def _fetch_data(self, dates_to_fetch: list) -> dict[str, pd.DataFrame]:
-        """Helper function to fetch data for a specific list of dates."""
-        if not self.symbols or not dates_to_fetch:
-            return {}
-
+        if not self.symbols or not dates_to_fetch: return {}
         in_params_symbols = {f"sym_{i}": sym for i, sym in enumerate(self.symbols)}
         in_params_dates = {f"d_{i}": dt for i, dt in enumerate(dates_to_fetch)}
-
         placeholders_symbols = ", ".join(f":{key}" for key in in_params_symbols)
         placeholders_dates = ", ".join(f":{key}" for key in in_params_dates)
-
         query = text(f"SELECT * FROM price_data WHERE symbol IN ({placeholders_symbols}) AND date IN ({placeholders_dates})")
-
         params = {**in_params_symbols, **in_params_dates}
-
         with self.db_engine.connect() as conn:
             df = pd.read_sql(query, conn, params=params, parse_dates=['timestamp'])
-
         if df.empty: return {}
-
         if df['timestamp'].dt.tz is None:
             df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
         else:
             df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
-
         df.set_index('timestamp', inplace=True)
         df.columns = [col.lower() for col in df.columns]
-
         return {sym: sym_df for sym, sym_df in df.groupby('symbol')}
 
     def run(self):
@@ -203,7 +190,8 @@ class BacktestEngine:
 
             self.strategy.on_session_end()
             if not all_bars_today.empty:
-                self.ledger._update_equity(all_bars_today.index[-1], self.current_prices)
+                # --- BUG FIX APPLIED HERE ---
+                self.ledger._update_equity(all_bars_today.index[-1], self.strategy.current_prices)
 
         engine_logger.info("Backtest finished.")
         return self.ledger

@@ -17,7 +17,6 @@ class BaseStrategy(ABC):
         self.params = params
         self.active_trades = {}
         self.current_prices = {s: 0 for s in symbols}
-        self.data_for_day = {}
         self.logger = self._setup_logger()
 
     def _setup_logger(self):
@@ -39,39 +38,28 @@ class BaseStrategy(ABC):
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)
 
-        # --- FIX: Set level to DEBUG to capture all log messages ---
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
         return logger
 
     @abstractmethod
     def get_required_lookback(self) -> int:
+        """Returns the number of trading days of historical data required."""
+        pass
+
+    @abstractmethod
+    def on_market_open(self, historical_data: dict[str, pd.DataFrame]):
         """
-        Returns the number of days of historical data required by the strategy
-        before the current trading day.
+        NEW: Called once at the start of each day with historical data ONLY.
+        Use this to pre-calculate indicators and find potential candidates.
         """
         pass
 
-    def on_new_day(self, trade_date: pd.Timestamp, data: dict[str, pd.DataFrame]):
-        """
-        Called at the start of each new trading day. Sets the data for the day.
-        """
-        self.data_for_day = data
-
-    def on_session_start(self, session_data: dict[str, pd.DataFrame]):
-        """
-        Called once at the very start of the trading session simulation.
-        """
-        pass # Optional for strategies to implement
-
+    @abstractmethod
     def on_bar(self, symbol: str, bar: pd.Series):
-        """
-        Called for each new bar of data for a specific symbol.
-        """
+        """Called for each new bar of intraday data."""
         self.current_prices[symbol] = bar['close']
 
     def on_session_end(self):
-        """
-        Called once at the very end of the trading session simulation.
-        """
-        pass # Optional for strategies to implement
+        """Called once at the very end of the trading session simulation."""
+        pass

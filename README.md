@@ -59,3 +59,4 @@ The primary strategy developed on this platform is a long-only, day-trading stra
 -   **New Strategies**: Implement other strategies based on "Mind Over Markets" or different trading concepts.
 -   **Live Trading Integration**: Build out the components necessary to connect the strategy logic to a live paper or real money account via the Interactive Brokers API.
 -   **Portfolio-Level Analysis**: Enhance the results module to aggregate statistics across multiple backtest runs and provide portfolio-level insights.
+-   **User Interface**: Consider developing a simple UI for easier configuration and monitoring of backtests.  Streamlit, maybe?

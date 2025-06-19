@@ -47,7 +47,6 @@ class VolumeAccumulationStrategy(BaseStrategy):
 
         for symbol, df in self.data_for_day.items():
             day_data = df[df.index.date == breakout_date]
-            # Use all data before the breakout day for the lookback period
             consol_data = df[df.index.date < breakout_date]
 
             if day_data.empty: continue
@@ -56,28 +55,26 @@ class VolumeAccumulationStrategy(BaseStrategy):
             last_close = day_data['close'].iloc[-1]
             if not self.min_price <= last_close <= self.max_price: continue
 
-            # --- NEW: Logic for handling both consolidation and no-consolidation tests ---
+            # --- Logic for handling both consolidation and no-consolidation tests ---
             is_candidate = False
             poc_data = pd.DataFrame()
             stop_loss_price = 0
 
             if self.consolidation_days == 0:
-                # --- NO-CONSOLIDATION LOGIC: Look for a simple volume spike ---
-                if consol_data.empty: continue # Need at least one prior day
+                if consol_data.empty: continue
 
                 prev_day_volume = consol_data[consol_data.index.date == consol_data.index.date.max()]['volume'].sum()
                 current_day_volume = day_data['volume'].sum()
 
                 if prev_day_volume > 0 and current_day_volume > (prev_day_volume * self.breakout_volume_ratio):
                     is_candidate = True
-                    poc_data = day_data # Use today's data for POC
+                    poc_data = day_data
                     stop_loss_price = day_data['low'].min()
             else:
-                # --- STANDARD CONSOLIDATION LOGIC ---
                 if consol_data.empty: continue
 
-                # Check for sufficient historical days for a valid consolidation
-                if len(consol_data.index.date.unique()) < self.consolidation_days: continue
+                # --- FIX APPLIED HERE: Changed .unique() to len(set(...)) ---
+                if len(set(consol_data.index.date)) < self.consolidation_days: continue
 
                 consol_high = consol_data['high'].max()
                 consol_low = consol_data['low'].min()
@@ -93,10 +90,9 @@ class VolumeAccumulationStrategy(BaseStrategy):
 
                 if last_close > consol_high:
                     is_candidate = True
-                    poc_data = consol_data # Use consolidation data for POC
+                    poc_data = consol_data
                     stop_loss_price = consol_low
 
-            # If any logic path found a candidate, calculate its profile
             if is_candidate:
                 profiler = VolumeProfiler(self.tick_size)
                 profile = profiler.calculate(poc_data)

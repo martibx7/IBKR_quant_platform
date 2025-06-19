@@ -41,16 +41,13 @@ def main():
         except ValueError:
             print("Invalid format. Please use YYYY-MM-DD.")
 
-    # Initialize the engine once
     engine = BacktestEngine(config_path, start_date=start_date_str, end_date=end_date_str)
 
-    # Use the engine's main run loop for a cleaner implementation
     print("\nStarting backtest...")
-    # --- FIX: engine.run() returns the ledger, which we pass to BacktestResults ---
     final_ledger = engine.run()
 
-    # Wrap the returned ledger in the results class
-    results = BacktestResults(final_ledger)
+    # We need the engine object to pass to BacktestResults for Alpha/Beta calculation
+    results = BacktestResults(final_ledger, engine)
 
     if results and not results.trade_log.empty:
         print("\n--- Backtest Run Complete ---")
@@ -61,9 +58,13 @@ def main():
             os.makedirs(log_dir)
 
         log_filename = f"{log_dir}/trade_log_{engine.strategy_name}_{start_date_str}_to_{end_date_str}.xlsx"
-        # Call the method on the results object
         results.save_trade_log_to_excel(log_filename)
         print(f"Trade log saved to '{log_filename}'")
+
+        # --- FIX: Call the plot_equity_curve method directly on the results object ---
+        print("Displaying performance chart...")
+        results.plot_equity_curve()
+
     else:
         print("Backtest complete. No trades were executed.")
 

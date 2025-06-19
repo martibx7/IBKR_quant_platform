@@ -50,14 +50,15 @@ class BacktestEngine:
 
         self.db_engine = get_db_engine(self.config)
 
-        # --- FIX: Re-implement the liquidity filter from the old engine ---
-        self.symbols = self._get_liquid_symbols()
-
+        # --- UPDATE: Pass slippage settings to the Ledger ---
         self.ledger = BacktestLedger(
             initial_cash=self.backtest_params['initial_cash'],
-            fee_model=self._initialize_fee_model()
+            fee_model=self._initialize_fee_model(),
+            slippage_model=self.backtest_params.get('slippage_model', 'none'),
+            slippage_pct=self.backtest_params.get('slippage_pct', 0.0)
         )
 
+        self.symbols = self._get_liquid_symbols()
         self.strategy = self._initialize_strategy()
         self.trading_calendar = self._get_trade_dates()
         self.current_prices = {}

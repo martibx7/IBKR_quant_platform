@@ -4,16 +4,50 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from sqlalchemy import create_engine, text
 
 class BacktestResults:
     """
     Analyzes, displays, and plots the results of a backtest from a BacktestLedger.
     """
-    def __init__(self, ledger):
+    def __init__(self, ledger, engine=None):
         self.ledger = ledger
+        self.engine = engine
         self.trade_log = ledger.get_trade_log()
         self.equity_curve = ledger.get_equity_curve()
         self.metrics = self.calculate_metrics()
+
+    def _get_benchmark_returns(self, start_date, end_date, ticker='SPY') -> pd.Series:
+        """Fetches daily returns for a benchmark ticker from the database."""
+        if self.engine is None:
+            print("Warning: Database engine not provided. Cannot calculate Alpha and Beta.")
+            return pd.Series(dtype=float)
+
+        query = text(f"""
+            SELECT date, close FROM price_data
+            WHERE symbol = :ticker AND date BETWEEN :start AND :end
+            GROUP BY date
+            ORDER BY date;
+        """)
+        try:
+            with self.engine.db_engine.connect() as conn:
+                benchmark_df = pd.read_sql(query, conn, params={'ticker': ticker, 'start': start_date, 'end': end_date})
+
+            if benchmark_df.empty:
+                print(f"Warning: No benchmark data found for {ticker} in the specified date range.")
+                return pd.Series(dtype=float)
+
+            benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
+
+            # --- FIX APPLIED HERE ---
+            # Localize the benchmark's naive DatetimeIndex to UTC to match the portfolio's index.
+            benchmark_df['date'] = benchmark_df['date'].dt.tz_localize('UTC')
+
+            benchmark_df.set_index('date', inplace=True)
+            return benchmark_df['close'].pct_change().dropna()
+        except Exception as e:
+            print(f"Warning: Could not load benchmark data for {ticker}. Alpha and Beta will not be calculated. Error: {e}")
+            return pd.Series(dtype=float)
 
     def calculate_metrics(self):
         """Calculates all key performance metrics."""
@@ -23,16 +57,15 @@ class BacktestResults:
 
         total_pnl = self.trade_log['pnl'].sum()
         total_fees = self.trade_log['fees'].sum()
-        net_pnl = total_pnl - total_fees
+        net_pnl = total_pnl
         initial_equity = self.ledger.initial_cash
         final_equity = self.equity_curve['equity'].iloc[-1] if not self.equity_curve.empty else initial_equity
 
         winning_trades = self.trade_log[self.trade_log['pnl'] > 0]
         losing_trades = self.trade_log[self.trade_log['pnl'] <= 0]
-        num_winning = len(winning_trades)
-        num_losing = len(losing_trades)
-        total_trades = num_winning + num_losing
-        win_rate = (num_winning / total_trades) * 100 if total_trades > 0 else 0
+
+        total_trades = len(self.trade_log)
+        win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
 
         gross_profit = winning_trades['pnl'].sum()
         gross_loss = abs(losing_trades['pnl'].sum())
@@ -40,29 +73,43 @@ class BacktestResults:
 
         avg_win = winning_trades['pnl'].mean() if not winning_trades.empty else 0
         avg_loss = losing_trades['pnl'].mean() if not losing_trades.empty else 0
-
-        risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
+        reward_risk_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
 
         if not self.equity_curve.empty:
             self.equity_curve['peak'] = self.equity_curve['equity'].cummax()
             self.equity_curve['drawdown'] = self.equity_curve['equity'] - self.equity_curve['peak']
-            max_drawdown = self.equity_curve['drawdown'].min()
+            max_drawdown_dollars = self.equity_curve['drawdown'].min()
             max_drawdown_pct = (self.equity_curve['drawdown'] / self.equity_curve['peak']).min()
         else:
-            max_drawdown, max_drawdown_pct = 0, 0
+            max_drawdown_dollars, max_drawdown_pct = 0, 0
 
-        daily_equity = self.equity_curve['equity'].resample('D').last()
+        daily_equity = self.equity_curve['equity'].resample('D').last().dropna()
         daily_returns = daily_equity.pct_change().dropna()
         sharpe_ratio = self.calculate_sharpe_ratio(daily_returns)
 
+        start_date = self.equity_curve.index.min().date()
+        end_date = self.equity_curve.index.max().date()
+        benchmark_returns = self._get_benchmark_returns(start_date, end_date)
+
+        alpha, beta = None, None
+        if not benchmark_returns.empty:
+            aligned_df = pd.DataFrame({'portfolio': daily_returns, 'benchmark': benchmark_returns}).dropna()
+            covariance = aligned_df['portfolio'].cov(aligned_df['benchmark'])
+            market_variance = aligned_df['benchmark'].var()
+            beta = covariance / market_variance if market_variance != 0 else 0
+            risk_free_rate = 0.0
+            expected_return = risk_free_rate + beta * (aligned_df['benchmark'].mean() * 252)
+            actual_return = aligned_df['portfolio'].mean() * 252
+            alpha = actual_return - expected_return
+
         return {
-            'Initial Equity': f"${initial_equity:,.2f}", 'Final Equity': f"${final_equity:,.2f}",
-            'Total PnL': f"${total_pnl:,.2f}", 'Total Fees': f"${total_fees:,.2f}", 'Net PnL': f"${net_pnl:,.2f}",
-            'Total Trades': total_trades, 'Win Rate': f"{win_rate:.2f}%", 'Profit Factor': f"{profit_factor:.2f}",
-            'Avg Win': f"${avg_win:,.2f}", 'Avg Loss': f"${avg_loss:,.2f}",
-            'Reward/Risk Ratio': f"{risk_reward_ratio:.2f}:1" if risk_reward_ratio != float('inf') else 'inf',
-            'Max Drawdown': f"${max_drawdown:,.2f} ({max_drawdown_pct:.2%})",
-            'Sharpe Ratio (annualized)': f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else 'N/A',
+            "Initial Equity": initial_equity, "Final Equity": final_equity,
+            "Total PnL": total_pnl, "Total Fees": total_fees, "Net PnL": net_pnl,
+            "Total Trades": total_trades, "Win Rate": win_rate, "Profit Factor": profit_factor,
+            "Avg Win": avg_win, "Avg Loss": avg_loss, "Reward/Risk Ratio": reward_risk_ratio,
+            "Max Drawdown": max_drawdown_pct, "Max Drawdown ($)": max_drawdown_dollars,
+            "Sharpe Ratio (annualized)": sharpe_ratio,
+            "Alpha": alpha, "Beta": beta
         }
 
     def calculate_sharpe_ratio(self, returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252):
@@ -74,7 +121,15 @@ class BacktestResults:
         if not self.metrics: return
         print("\n--- Backtest Results ---")
         for key, value in self.metrics.items():
-            print(f"{key:<28} {str(value):>15}")
+            if isinstance(value, float):
+                if key in ['Win Rate', 'Max Drawdown']:
+                    print(f"{key:<28} {value:.2f}%")
+                elif key in ['Max Drawdown ($)']:
+                    print(f"{key:<28} ${value:,.2f}")
+                else:
+                    print(f"{key:<28} {value:.2f}")
+            else:
+                print(f"{key:<28} {str(value)}")
         print("--------------------------------------------\n")
 
     def plot_equity_curve(self):
@@ -102,11 +157,8 @@ class BacktestResults:
         if self.trade_log.empty:
             print("No trades to export.")
             return
-
         try:
             log_to_save = self.trade_log.copy()
-
-            # --- FIX: Convert datetime columns to timezone-naive before exporting ---
             if 'entry_time' in log_to_save.columns:
                 log_to_save['entry_time'] = log_to_save['entry_time'].dt.tz_localize(None)
             if 'exit_time' in log_to_save.columns:

@@ -1,191 +1,162 @@
 import pandas as pd
-from datetime import time
+from datetime import time, datetime
 import pytz
 
 from strategies.base import BaseStrategy
-from analytics.profiles import VolumeProfiler, get_session
+from analytics.indicators import calculate_atr
 
 class VolumeAccumulationStrategy(BaseStrategy):
     """
-    Final, bias-free version. Pre-calculates historical metrics at market open,
-    then evaluates breakout conditions on a bar-by-bar basis.
+    Implements a classic "breakout and retest" strategy with a multi-step
+    entry confirmation to avoid whipsaws.
     """
     def __init__(self, symbols: list[str], ledger, config: dict, **params):
         super().__init__(symbols, ledger, config, **params)
-        self.min_price               = self.params.get('min_price', 5.00)
-        self.max_price               = self.params.get('max_price', 100.00)
+        self.params = params
         self.consolidation_days      = self.params.get('consolidation_days', 10)
-        self.volume_lookback_days    = self.params.get('volume_lookback_days', 20)
-        self.consolidation_range_pct = self.params.get('consolidation_range_pct', 0.07)
-        self.breakout_volume_ratio   = self.params.get('breakout_volume_ratio', 1.5)
         self.risk_per_trade_pct      = self.params.get('risk_per_trade_pct', 0.01)
-        self.profit_target_r         = self.params.get('profit_target_r', 1.5)
+        self.profit_target_r         = self.params.get('profit_target_r', 1.2)
         self.breakeven_trigger_r     = self.params.get('breakeven_trigger_r', 0.75)
-        self.tick_size               = self.config['backtest'].get('tick_size_volume_profile', 0.01)
-        self.ny_timezone             = pytz.timezone('America/New_York')
+        self.breakout_volume_ratio   = self.params.get('breakout_volume_ratio', 3.0)
 
-        # --- Strategy State ---
+        atr_params = self.params.get('atr_filter', {})
+        self.atr_period = atr_params.get('period', 14)
+        self.min_atr_pct = atr_params.get('min_atr_pct', 0.015)
+
+        time_params = self.params.get('entry_time_window', {})
+        self.entry_start_time = time.fromisoformat(time_params.get('start', '10:00:00'))
+        self.entry_end_time = time.fromisoformat(time_params.get('end', '13:00:00'))
+
+        self.ny_timezone = pytz.timezone('America/New_York')
         self.candidates = {}
-        self.intraday_data = {}
-
-        # --- NEW: Reporting Stats ---
-        self.report_stats = {
-            'total_symbols_evaluated': 0,
-            'passed_consolidation': 0,
-            'breakouts_detected': 0,
-            'setups_triggered': 0,
-            'entries_confirmed': 0,
-        }
+        self.todays_traded = set()
+        self.report_stats = {'candidates': 0, 'filtered_by_atr': 0, 'breakouts': 0, 'setups': 0, 'entries': 0}
+        self.logger.info(f"Strategy '{self.__class__.__name__}' initialized with parameters: {self.params}")
 
     def get_required_lookback(self) -> int:
-        return max(self.consolidation_days, self.volume_lookback_days)
+        return self.consolidation_days + self.atr_period + 5
 
     def on_market_open(self, historical_data: dict[str, pd.DataFrame]):
-        self.logger.info(f"--- Pre-calculating consolidation metrics for {len(historical_data)} symbols ---")
+        self.logger.info(f"--- Pre-calculating consolidation metrics ---")
         self.candidates.clear()
-        self.intraday_data.clear()
-        self.report_stats['total_symbols_evaluated'] += len(historical_data)
+        self.todays_traded.clear()
+        self.report_stats = {key: 0 for key in self.report_stats}
 
         for symbol, df in historical_data.items():
-            if df.empty or len(set(df.index.date)) < self.consolidation_days:
-                continue
+            if df.empty or len(set(df.index.date)) < (self.consolidation_days + self.atr_period): continue
 
             df.index = df.index.tz_convert(self.ny_timezone)
             rth_df = df.between_time('09:30', '16:00', inclusive='left')
-
             if rth_df.empty: continue
 
-            consol_high = rth_df['high'].max()
-            consol_low = rth_df['low'].min()
-            if consol_low == 0 or (consol_high - consol_low) / consol_low > self.consolidation_range_pct: continue
+            daily_df = rth_df.resample('D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
+            if len(daily_df) < self.atr_period: continue
 
-            avg_daily_volume = rth_df.groupby(rth_df.index.date)['volume'].sum().mean()
-            profile = VolumeProfiler(self.tick_size).calculate(rth_df)
+            daily_df['atr'] = calculate_atr(daily_df, period=self.atr_period)
+            if daily_df.empty or pd.isna(daily_df['atr'].iloc[-1]): continue
 
-            if profile:
-                self.candidates[symbol] = {
-                    'status': 'monitoring', 'consol_high': consol_high,
-                    'stop_loss': consol_low, 'avg_daily_volume': avg_daily_volume,
-                    'poc': profile['poc_price'],
-                }
+            last_atr = daily_df['atr'].iloc[-1]
+            last_close = daily_df['close'].iloc[-1]
 
-        self.report_stats['passed_consolidation'] += len(self.candidates)
-        self.logger.info(f"Found {len(self.candidates)} symbols with valid consolidations to monitor.")
+            if last_close == 0 or (last_atr / last_close) < self.min_atr_pct:
+                self.report_stats['filtered_by_atr'] += 1
+                continue
+
+            consolidation_df = daily_df.tail(self.consolidation_days)
+            self.candidates[symbol] = {
+                'consol_high': consolidation_df['high'].max(),
+                'stop_loss': consolidation_df['low'].min(),
+                'avg_daily_volume': consolidation_df['volume'].mean(),
+                'status': 'monitoring',
+            }
+        self.report_stats['candidates'] = len(self.candidates)
+        self.logger.info(f"Found {self.report_stats['candidates']} candidates after filtering. ({self.report_stats['filtered_by_atr']} filtered by ATR).")
 
     def on_bar(self, symbol: str, bar: pd.Series):
+        if symbol in self.todays_traded: return
         super().on_bar(symbol, bar)
-        if symbol not in self.intraday_data: self.intraday_data[symbol] = []
-        self.intraday_data[symbol].append(bar)
 
-        if symbol in self.active_trades: self._manage_active_trade(symbol, bar)
-        elif symbol in self.candidates: self._scan_and_handle_entry(symbol, bar)
+        if symbol in self.active_trades:
+            self._manage_active_trade(symbol, bar)
+        elif symbol in self.candidates:
+            self._scan_for_entry(symbol, bar)
 
-    def _scan_and_handle_entry(self, symbol: str, bar: pd.Series):
-        ny_time = bar.name.tz_convert(self.ny_timezone)
-        if not (time(9, 30) <= ny_time.time() < time(16, 0)): return
-
+    def _scan_for_entry(self, symbol: str, bar: pd.Series):
         candidate = self.candidates[symbol]
+        ny_time = bar.name.tz_convert(self.ny_timezone).time()
 
+        # State 1: Monitor for a breakout above the historical consolidation high
         if candidate['status'] == 'monitoring':
-            minutes_since_open = (ny_time.hour - 9) * 60 + (ny_time.minute - 30)
-            fraction_of_day = min(1.0, minutes_since_open / 390)
-            rth_bars = [b for b in self.intraday_data[symbol] if time(9, 30) <= b.name.tz_convert(self.ny_timezone).time() < time(16, 0)]
-            current_rth_volume = sum(b['volume'] for b in rth_bars)
-            expected_volume = candidate['avg_daily_volume'] * fraction_of_day
-            is_high_volume = current_rth_volume > (expected_volume * self.breakout_volume_ratio)
-            is_breakout = bar['close'] > candidate['consol_high']
-            price_ok = self.min_price <= bar['close'] <= self.max_price
-
-            if price_ok and is_high_volume and is_breakout:
-                self.logger.info(f"  [BREAKOUT DETECTED] {symbol} @ {bar['close']:.2f} on high relative volume.")
+            if bar['close'] > candidate['consol_high']:
+                self.logger.info(f"  [BREAKOUT] {symbol} broke consolidation high {candidate['consol_high']:.2f}.")
                 candidate['status'] = 'watching_for_retest'
-                self.report_stats['breakouts_detected'] += 1
+                self.report_stats['breakouts'] += 1
 
-        elif candidate['status'] == 'watching_for_retest' and bar['low'] <= candidate['poc']:
-            candidate.update({'status': 'triggered', 'confirmation_high': bar['high']})
-            self.logger.info(f"  [SETUP] {symbol} re-tested POC {candidate['poc']:.2f}. Waiting for confirmation above {bar['high']:.2f}.")
-            self.report_stats['setups_triggered'] += 1
+        # State 2: After breakout, wait for a pullback to touch the old high
+        elif candidate['status'] == 'watching_for_retest':
+            if bar['low'] <= candidate['consol_high']:
+                self.logger.info(f"  [RETEST] {symbol} re-tested consolidation high at {candidate['consol_high']:.2f}.")
+                candidate['status'] = 'retest_confirmed'
+                self.report_stats['setups'] += 1
 
-        elif candidate['status'] == 'triggered' and bar['high'] > candidate['confirmation_high']:
-            entry_price = candidate['confirmation_high']
-            risk_per_share = entry_price - candidate['stop_loss']
-            if risk_per_share <= 0:
-                del self.candidates[symbol]
+        # State 3: After retest, wait for price to close back above the level to confirm entry
+        elif candidate['status'] == 'retest_confirmed':
+            # Only attempt entry within the configurable time window
+            if not (self.entry_start_time <= ny_time < self.entry_end_time):
                 return
 
-            equity = self.ledger.get_total_equity(self.current_prices)
-            quantity = int((equity * self.risk_per_trade_pct) / risk_per_share)
+            if bar['close'] > candidate['consol_high']:
+                self.logger.info(f"  [CONFIRMATION] {symbol} confirmed support at {candidate['consol_high']:.2f}.")
+                self._execute_trade(symbol, bar, candidate)
+                return
 
-            if quantity > 0:
-                self.logger.info(f"  [ENTRY] {symbol}: Confirmed above {entry_price:.2f}.")
-                if self.ledger.record_trade(bar.name, symbol, quantity, entry_price, 'BUY', self.current_prices):
-                    self.active_trades[symbol] = {
-                        'entry_price': entry_price, 'stop_loss': candidate['stop_loss'],
-                        'profit_target': entry_price + (risk_per_share * self.profit_target_r),
-                        'quantity': quantity, 'risk_per_share': risk_per_share
-                    }
-                    self.report_stats['entries_confirmed'] += 1
-            if symbol in self.candidates: del self.candidates[symbol]
+    def _execute_trade(self, symbol: str, bar: pd.Series, candidate: dict):
+        if symbol in self.active_trades: return
+
+        entry_price = bar['close'] # Enter at the close of the confirmation bar
+        stop_loss_price = candidate['stop_loss']
+        risk_per_share = entry_price - stop_loss_price
+        if risk_per_share <= 0: return
+
+        equity = self.ledger.get_total_equity(self.current_prices)
+        quantity = int((equity * self.risk_per_trade_pct) / risk_per_share)
+        quantity = min(quantity, int(bar['volume'] * 0.05))
+
+        if quantity < 1:
+            self.todays_traded.add(symbol)
+            return
+
+        self.todays_traded.add(symbol)
+        self.report_stats['entries'] += 1
+        self.logger.info(f"  [ENTRY ATTEMPT] {symbol}")
+
+        if self.ledger.record_trade(bar.name, symbol, quantity, entry_price, 'BUY', self.current_prices):
+            self.active_trades[symbol] = {
+                'entry_price': entry_price, 'stop_loss': stop_loss_price,
+                'profit_target': entry_price + (risk_per_share * self.profit_target_r),
+                'quantity': quantity, 'risk_per_share': risk_per_share
+            }
+            candidate['status'] = 'trade_taken'
+        else:
+            self.todays_traded.discard(symbol)
+            self.report_stats['entries'] -= 1
 
     def _manage_active_trade(self, symbol: str, bar: pd.Series):
         trade = self.active_trades.get(symbol)
         if not trade: return
-
         if not trade.get('is_breakeven', False):
             if bar['high'] >= trade['entry_price'] + (trade['risk_per_share'] * self.breakeven_trigger_r):
                 trade.update({'stop_loss': trade['entry_price'], 'is_breakeven': True})
                 self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
-
         exit_price, reason = None, None
         if bar['low'] <= trade['stop_loss']: exit_price, reason = trade['stop_loss'], "Stop Loss"
         elif bar['high'] >= trade.get('profit_target', float('inf')): exit_price, reason = trade['profit_target'], "Profit Target"
-
         ny_time = bar.name.tz_convert(self.ny_timezone).time()
         if ny_time >= time(15, 50): exit_price, reason = bar['close'], "End of Day"
-
         if exit_price and reason:
             self.logger.info(f"  [EXIT] {symbol} @ {exit_price:.2f} ({reason})")
             self.ledger.record_trade(bar.name, symbol, trade['quantity'], exit_price, 'SELL', self.current_prices, exit_reason=reason)
             if symbol in self.active_trades: del self.active_trades[symbol]
 
     def on_session_end(self):
-        self.intraday_data.clear()
-
-    def generate_report(self):
-        self.logger.info("\n--- Strategy Funnel Report ---")
-
-        # --- Phase 1: Consolidation ---
-        passed_consol = self.report_stats['passed_consolidation']
-        total_eval = self.report_stats['total_symbols_evaluated']
-        failed_consol = total_eval - passed_consol
-        pass_pct = (passed_consol / total_eval * 100) if total_eval > 0 else 0
-        self.logger.info(f"\n[Phase 1: Consolidation Screening]")
-        self.logger.info(f"  - Total Symbols Evaluated: {total_eval}")
-        self.logger.info(f"  - Passed: {passed_consol} ({pass_pct:.2f}%)")
-        self.logger.info(f"  - Failed: {failed_consol}")
-
-        # --- Phase 2: Breakout ---
-        breakouts = self.report_stats['breakouts_detected']
-        no_breakout = passed_consol - breakouts
-        pass_pct = (breakouts / passed_consol * 100) if passed_consol > 0 else 0
-        self.logger.info(f"\n[Phase 2: Breakout Detection (from Consolidated)]")
-        self.logger.info(f"  - Passed: {breakouts} ({pass_pct:.2f}%)")
-        self.logger.info(f"  - Failed (No Breakout): {no_breakout}")
-
-        # --- Phase 3: POC Retest (Setup) ---
-        setups = self.report_stats['setups_triggered']
-        no_retest = breakouts - setups
-        pass_pct = (setups / breakouts * 100) if breakouts > 0 else 0
-        self.logger.info(f"\n[Phase 3: POC Retest (from Breakouts)]")
-        self.logger.info(f"  - Passed: {setups} ({pass_pct:.2f}%)")
-        self.logger.info(f"  - Failed (No Retest): {no_retest}")
-
-        # --- Phase 4: Entry Confirmation ---
-        entries = self.report_stats['entries_confirmed']
-        no_confirm = setups - entries
-        pass_pct = (entries / setups * 100) if setups > 0 else 0
-        self.logger.info(f"\n[Phase 4: Entry Confirmation (from Setups)]")
-        self.logger.info(f"  - Passed (Trades Entered): {entries} ({pass_pct:.2f}%)")
-        self.logger.info(f"  - Failed (No Confirmation): {no_confirm}")
-
-        self.logger.info("\n--------------------------------\n")
+        self.logger.info(f"Funnel stats: {self.report_stats}")

@@ -1,7 +1,7 @@
 # config.yaml
 
 backtest:
-  initial_cash: 100000
+  initial_cash: 10000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
@@ -29,17 +29,34 @@ strategy:
   parameters:
 
     VolumeAccumulationStrategy:
-      # symbols: ['GLW']
+      # General strategy settings
       log_file: 'logs/volume_accumulation.log'
-      min_price: 2.00                 # Minimum price to filter out low-value stocks
-      max_price: 2000.00             # Maximum price to filter out high-value stocks
-      consolidation_days: 10         # Number of days to look back for a consolidation range
-      volume_lookback_days: 10
-      consolidation_range_pct: 0.15   # Max range (as % of low) to be considered consolidation
-      breakout_volume_ratio: 2      # Volume must be 1.5x the average of the last 10 days
-      risk_per_trade_pct: 0.01        # Risk 1% of total equity per trade
-      profit_target_r: 1.5            # Profit target is 1.5x the risk
-      breakeven_trigger_r: 0.75       # Move SL to breakeven when 75% of PT is reached
+      min_price: 2.00
+      max_price: 2000.00
+      consolidation_days: 10
+      risk_per_trade_pct: 0.01
+      breakeven_trigger_r: 0.75
+
+        # --- NEW: Configurable Time Window for Entries ---
+      entry_time_window:
+        start: '10:00:00' # Only look for entries after 10 AM ET
+        end: '13:00:00'   # Stop looking for new entries after 1 PM ET
+
+      # --- Volatility Filter ---
+      atr_filter:
+        period: 14
+        min_atr_pct: 0.02
+
+      # --- Path 1: Open-Drive Settings ---
+      enable_open_drive: false # Set to 'false' for A/B testing
+      open_drive_vol_ratio: 2.0
+      open_drive_r_target: 1.5
+      vwap_stop_pct: 0.005
+
+      # --- Path 2: Mid-Morning Settings ---
+      mid_morning_vol_ratio: 5
+      mid_morning_r_target: 1.5
+      poc_stop_pct: 0.01
       timezone: 'America/New_York'
 
     ConsolidationScreenerStrategy:

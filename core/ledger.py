@@ -55,6 +55,14 @@ class BacktestLedger:
         if order_type.upper() not in ['BUY', 'SELL']:
             return False
 
+        # ─── SAFETY-NET: block duplicate direction trades ──────────────────
+        if order_type.upper() == 'BUY' and symbol in self.open_positions:
+            # already long – ignore additional BUYs
+            return False
+        if order_type.upper() == 'SELL' and symbol not in self.open_positions:
+            # not long – can’t sell
+            return False
+
         # --- NEW: Apply slippage to get the execution price ---
         execution_price = self._apply_slippage(price, order_type)
 

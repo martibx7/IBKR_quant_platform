@@ -24,13 +24,13 @@ def calculate_vwap(df: pd.DataFrame, session: str = None) -> pd.DataFrame:
     # Use .assign() to create all new columns in one step, which is more efficient
     # and also avoids the SettingWithCopyWarning.
     df = df.assign(
-        typical_price = (df['High'] + df['Low'] + df['Close']) / 3,
-        tp_x_volume = lambda x: x['typical_price'] * x['Volume']
+        typical_price = (df['high'] + df['low'] + df['close']) / 3,
+        tp_x_volume = lambda x: x['typical_price'] * x['volume']
     )
 
     df = df.assign(
         cumulative_tp_x_volume = df['tp_x_volume'].cumsum(),
-        cumulative_volume = df['Volume'].cumsum()
+        cumulative_volume = df['volume'].cumsum()
     )
 
     df['vwap'] = df['cumulative_tp_x_volume'] / df['cumulative_volume']
@@ -48,6 +48,19 @@ def calculate_moving_averages(df: pd.DataFrame, field: str = 'Close', periods: l
         df_out[f'sma_{field.lower()}_{period}m'] = calculate_sma(df_out, period, field)
         df_out[f'ema_{field.lower()}_{period}m'] = calculate_ema(df_out, period, field)
     return df_out
+
+# --- NEW: ATR Calculation Function ---
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Calculates the Average True Range (ATR) on a DataFrame with daily OHLC data.
+    """
+    df_atr = df.copy()
+    df_atr['h-l'] = df_atr['high'] - df_atr['low']
+    df_atr['h-pc'] = abs(df_atr['high'] - df_atr['close'].shift(1))
+    df_atr['l-pc'] = abs(df_atr['low'] - df_atr['close'].shift(1))
+    df_atr['tr'] = df_atr[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+    return df_atr['tr'].rolling(window=period).mean()
+
 
 def calculate_200_day_ema(df: pd.DataFrame, field: str = 'Close') -> pd.DataFrame:
     """

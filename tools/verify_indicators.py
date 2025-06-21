@@ -26,7 +26,8 @@ def load_data_for_ticker(data_dir: str, ticker: str) -> pd.DataFrame:
         df = df.rename(columns={'date': 'timestamp'})
         df.set_index(pd.to_datetime(df['timestamp'], utc=True), inplace=True)
         df = df[['open', 'high', 'low', 'close', 'volume']]
-        df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        # --- FIX #1: Column names are now lowercase to match the analytics library. ---
+        df.columns = ['open', 'high', 'low', 'close', 'volume']
         return df.apply(pd.to_numeric)
     except Exception as e:
         print(f"Error loading or processing {filepath}: {e}")
@@ -48,6 +49,7 @@ def analyze_day(day_df: pd.DataFrame, full_data_with_200d_sma: pd.DataFrame, tim
     end_of_day_timestamp = day_df.index[-1]
     val_200d_sma = 'N/A'
     if end_of_day_timestamp in full_data_with_200d_sma.index:
+        # --- FIX #2: Use lowercase 'close' to access the correct column ---
         val_200d_sma = full_data_with_200d_sma.loc[end_of_day_timestamp]['sma_close_200d']
 
     print(f"  200-Day SMA (End of Day): {val_200d_sma:.2f}" if isinstance(val_200d_sma, float) else f"  200-Day SMA (End of Day): {val_200d_sma}")
@@ -61,7 +63,8 @@ def analyze_day(day_df: pd.DataFrame, full_data_with_200d_sma: pd.DataFrame, tim
             print("     No data for this session.")
             continue
 
-        session_df = calculate_moving_averages(session_df, field='Close', periods=[9, 20, 50, 200])
+        # --- FIX #3: Use lowercase 'close' for the field argument ---
+        session_df = calculate_moving_averages(session_df, field='close', periods=[9, 20, 50, 200])
         vwap_df = calculate_vwap(session_df.copy())
         final_vwap = vwap_df['vwap'].iloc[-1] if not vwap_df.empty else 'N/A'
 
@@ -82,7 +85,6 @@ def analyze_day(day_df: pd.DataFrame, full_data_with_200d_sma: pd.DataFrame, tim
             print(f"       - {period}-min SMA: {sma_val:.2f}" if isinstance(sma_val, float) else f"       - {period}-min SMA: {sma_val}")
             print(f"       - {period}-min EMA: {ema_val:.2f}" if isinstance(ema_val, float) else f"       - {period}-min EMA: {ema_val}")
 
-        # --- FIX: Restored the missing print logic for profiles ---
         print("     Volume Profile:")
         if vol_profile:
             print(f"       - POC: {vol_profile['poc_price']:.2f}")
@@ -123,7 +125,8 @@ def main():
         return
 
     print("\nCalculating 200-day SMA across all available data...")
-    full_data = calculate_200_day_sma(full_data, field='Close')
+    # --- FIX #4: Use lowercase 'close' for the field argument ---
+    full_data = calculate_200_day_sma(full_data, field='close')
     print("...calculation complete.")
 
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')

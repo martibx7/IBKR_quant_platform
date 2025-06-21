@@ -1,7 +1,7 @@
 # config.yaml
 
 backtest:
-  initial_cash: 10000
+  initial_cash: 100000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
@@ -23,41 +23,73 @@ database:
 
 strategy:
   # Set the active strategy here.
-  name: 'VolumeAccumulationStrategy' # <--- CHANGE THIS LINE TO USE A NEW STRATEGY
+  name: 'ValueAreaFadeStrategy' # <--- CHANGE THIS LINE TO USE A NEW STRATEGY
 
   # --- All strategy parameters are defined below ---
   parameters:
 
     VolumeAccumulationStrategy:
       # General strategy settings
-      log_file: 'logs/volume_accumulation.log'
-      min_price: 2.00
-      max_price: 2000.00
-      consolidation_days: 10
-      risk_per_trade_pct: 0.01
-      breakeven_trigger_r: 0.75
-
-        # --- NEW: Configurable Time Window for Entries ---
-      entry_time_window:
-        start: '10:00:00' # Only look for entries after 10 AM ET
-        end: '13:00:00'   # Stop looking for new entries after 1 PM ET
-
-      # --- Volatility Filter ---
-      atr_filter:
-        period: 14
-        min_atr_pct: 0.02
-
-      # --- Path 1: Open-Drive Settings ---
-      enable_open_drive: false # Set to 'false' for A/B testing
-      open_drive_vol_ratio: 2.0
-      open_drive_r_target: 1.5
-      vwap_stop_pct: 0.005
-
-      # --- Path 2: Mid-Morning Settings ---
-      mid_morning_vol_ratio: 5
-      mid_morning_r_target: 1.5
-      poc_stop_pct: 0.01
+      log_file: 'logs/volume_accumulation_v3.log'
       timezone: 'America/New_York'
+      risk_per_trade_pct: 0.01
+      min_price: 3.00
+      max_price: 400.00
+
+      # --- Main Strategy Path: Consolidation Retest ---
+      consolidation_days: 10
+      consolidation_range_pct: 0.15
+      poc_midpoint_tolerance_pct: 0.25
+      retest_confirmation_bars: 1     # Number of consecutive bars to close above retest level
+      value_area_pct: 0.70
+      stop_loss_poc_buffer_pct: 0.02
+      min_stop_loss_ticks: 6
+      liquidity_cap_pct: 0.02   # Maximum 2% of equity in a single trade
+      profit_target_r: 1.75
+      breakeven_trigger_r: .75
+      entry_time_window:
+        start: '10:00:00'
+        end: '14:00:00'
+
+      # --- Relative Volume Check Parameters ---
+      enable_relative_volume_check: false
+      relative_volume_lookback: 20
+      relative_volume_ratio: 2
+
+      # --- Optional Secondary Path: Open-Drive ---
+      enable_open_drive: false
+      open_drive_r_target: 3
+      vwap_stop_pct: 0.01
+
+        # In config.yaml, under strategy.parameters
+
+      ValueAreaFadeStrategy:
+        log_file: 'logs/value_area_fade_v2.log'
+        timezone: 'America/New_York'
+
+        # --- Risk and Sizing ---
+        risk_per_trade_pct: 0.01
+        liquidity_cap_pct: 0.05
+
+        # --- Core Strategy Logic ---
+        value_area_pct: 0.70
+        confirmation_window_minutes: 5
+        primary_target: 'poc'
+
+        # --- NEW: Quality & Refinement Filters ---
+        entry_time_window:
+          start: '10:00:00'
+          end: '15:00:00'
+        min_dip_ticks: 3           # Price must close at least 3 ticks below VAL to arm
+        min_reward_risk_ratio: 1.0 # The potential reward must be >= 1.0x the risk
+
+        # --- Trade Management ---
+        stop_buffer_ticks: 2
+        breakeven_trigger_r: 0.75
+
+        # --- Watchlist Settings ---
+        use_symbol_file: true
+        symbol_file: 'strategies/sp_500.txt'
 
     ConsolidationScreenerStrategy:
       log_file: 'logs/consolidation_screener.log'

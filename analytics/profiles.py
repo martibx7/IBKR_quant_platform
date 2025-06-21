@@ -37,8 +37,10 @@ class VolumeProfiler:
     """
     Calculates a Volume Profile using a fast, vectorized algorithm.
     """
-    def __init__(self, tick_size: float):
+    # --- CHANGED: Added value_area_pct parameter ---
+    def __init__(self, tick_size: float, value_area_pct: float = 0.70):
         self.tick_size = tick_size
+        self.value_area_pct = value_area_pct
 
     def _calculate_distribution(self, df: pd.DataFrame) -> pd.Series:
         if df.empty or df['volume'].sum() == 0:
@@ -79,7 +81,8 @@ class VolumeProfiler:
         tv  = vd.sum()
         sv  = vd.sort_values(ascending=False)
         cum = sv.cumsum()
-        va_limit = tv * 0.7
+        # --- CHANGED: Use the value_area_pct parameter ---
+        va_limit = tv * self.value_area_pct
         va_sv    = sv[cum <= va_limit]
         if va_sv.empty:
             va_sv = sv.head(1)
@@ -97,8 +100,10 @@ class MarketProfiler:
     """
     Calculates a comprehensive Market Profile (TPO) using a vectorized approach.
     """
-    def __init__(self, tick_size: float = 0.05):
+    # --- CHANGED: Added value_area_pct parameter ---
+    def __init__(self, tick_size: float = 0.05, value_area_pct: float = 0.70):
         self.tick_size   = tick_size
+        self.value_area_pct = value_area_pct
         self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
 
     def calculate(self, df: pd.DataFrame) -> dict | None:
@@ -151,7 +156,8 @@ class MarketProfiler:
         counts = pd.Series({p: len(v) for p, v in profile.items()})
         poc    = counts.idxmax()
         total  = counts.sum()
-        target = total * 0.7
+        # --- CHANGED: Use the value_area_pct parameter ---
+        target = total * self.value_area_pct
         current = counts[poc]
         prices = [poc]
 

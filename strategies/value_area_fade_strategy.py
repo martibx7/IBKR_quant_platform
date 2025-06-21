@@ -1,204 +1,392 @@
-import pandas as pd
+# strategies/value_area_fade_strategy.py
+"""
+Intraday Value-Area Fade – v3.0.2
+
+Upgrades vs. v2.x
+-----------------
+* Vol-scaled stop & sizing  (ATR-based)
+* Profile-shape gate        (default only after D-profiles)
+* Gap-day auto-skip         (open gap ≥ N ATRs)
+"""
+
+from __future__ import annotations
+
 from datetime import time, timedelta
-import pytz
-import os
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+import time as perf_timer # LOGGING: For performance timing
+import json # LOGGING: To format parameters
+
+import pandas as pd
 
 from strategies.base import BaseStrategy
-from analytics.profiles import VolumeProfiler
+from analytics.profiles import VolumeProfiler, MarketProfiler
+from analytics.indicators import calculate_atr
+
 
 class ValueAreaFadeStrategy(BaseStrategy):
-    """
-    Implements a "Value-Area Extension Failure" strategy with additional
-    time-based and quality-based filters to refine entries.
-    """
-    def __init__(self, symbols: list[str], ledger, config: dict, **params):
-        # This super call is what initializes the logger from BaseStrategy
+    """Long-only value-area fade with volatility-aware risk controls."""
+
+    # ------------------------------------------------------------------ #
+    # Helpers                                                             #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _load_symbol_file(path_like: str) -> Set[str]:
+        p = Path(path_like).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"Symbol file not found: {p}")
+        with p.open() as fh:
+            return {
+                line.strip().upper()
+                for line in fh
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+
+    # ------------------------------------------------------------------ #
+    # Life-cycle                                                          #
+    # ------------------------------------------------------------------ #
+    def __init__(self, symbols: List[str], ledger, config: Dict, **params):
         super().__init__(symbols, ledger, config, **params)
 
-        self.params = params
-        self.timezone = pytz.timezone(self.params.get('timezone', 'America/New_York'))
+        # -------- watch-list ----------------------------------------- #
+        self.symbol_whitelist: Optional[Set[str]] = None
+        if params.get("use_symbol_file"):
+            symbol_file = params.get("symbol_file")
+            if not symbol_file:
+                raise ValueError("'symbol_file' required when 'use_symbol_file' is true")
+            self.symbol_whitelist = self._load_symbol_file(symbol_file)
+            self.symbols = [s for s in self.symbols if s in self.symbol_whitelist]
+            self.current_prices = {s: 0.0 for s in self.symbols}
 
-        self.use_symbol_file = self.params.get('use_symbol_file', False)
-        self.symbol_file = self.params.get('symbol_file', '')
-        self.watchlist = set()
 
-        self.risk_per_trade_pct = self.params.get('risk_per_trade_pct', 0.01)
-        self.liquidity_cap_pct = self.params.get('liquidity_cap_pct', 0.05)
-        self.value_area_pct = self.params.get('value_area_pct', 0.70)
-        self.confirmation_window = timedelta(minutes=self.params.get('confirmation_window_minutes', 5))
-        self.stop_buffer_ticks = self.params.get('stop_buffer_ticks', 2)
-        self.primary_target = self.params.get('primary_target', 'poc')
-        self.breakeven_trigger_r = self.params.get('breakeven_trigger_r', 0.75)
+        # -------- timing --------------------------------------------- #
+        win = params.get("entry_time_window", {})
+        self.entry_start_time = time.fromisoformat(win.get("start", "10:00:00"))
+        self.entry_end_time   = time.fromisoformat(win.get("end",   "15:00:00"))
+        self.exit_time        = time.fromisoformat(params.get("exit_time", "15:55:00"))
+        self.session_open_time = time.fromisoformat(
+            params.get("session_open_time", "09:30:00")
+        )
+        self.cooldown_period = timedelta(
+            minutes=params.get("cooldown", {}).get("minutes", 30)
+        )
 
-        time_params = self.params.get('entry_time_window', {})
-        self.entry_start_time = time.fromisoformat(time_params.get('start', '10:00:00'))
-        self.entry_end_time = time.fromisoformat(time_params.get('end', '15:00:00'))
-        self.min_dip_ticks = self.params.get('min_dip_ticks', 3)
-        self.min_reward_risk_ratio = self.params.get('min_reward_risk_ratio', 1.0)
+        # -------- params / filters ----------------------------------- #
+        self.lookback_days   = params.get("lookback_days", 10)
+        self.value_area_pct  = params.get("value_area_pct", 0.70)
+        self.confirm_minutes = params.get("confirmation_window_minutes", 0)
 
-        self.tick_size = config.get('backtest', {}).get('tick_size_market_profile', 0.01)
+        self.atr_stop_mult   = params.get("atr_stop_mult", 0.5)
+        self.gap_skip_thresh = params.get("gap_skip_threshold", 1.0)
+        self.allowed_shapes  = set(map(str.upper, params.get("allowed_shapes", ["D"])))
 
-        self.candidates = {}
-        self.active_trades = {}
-        self.todays_traded = set()
-        self.session_dataframes = {}
+        self.min_dip_ticks   = params.get("min_dip_ticks", 3)
+        self.min_rr          = params.get("min_reward_risk_ratio", 1.0)
 
-        self.logger.info(f"Strategy '{self.__class__.__name__}' initialized with parameters: {self.params}")
+        # -------- risk / sizing -------------------------------------- #
+        self.risk_pct          = params.get("risk_per_trade_pct", 0.01)
+        self.liquidity_cap_pct = params.get("liquidity_cap_pct", 0.05)
 
+        # -------- tick size ------------------------------------------ #
+        self.tick_size = float(
+            self.config.get("backtest", {}).get(
+                "tick_size_market_profile",
+                self.config.get("backtest", {}).get("tick_size_volume_profile", 0.01),
+            )
+        )
+
+        # -------- profile engine ------------------------------------- #
+        self.profile_type = params.get("profile_type", "volume").lower()
+        if self.profile_type not in {"volume", "market"}:
+            raise ValueError("profile_type must be 'volume' or 'market'")
+        self._profiler = (
+            VolumeProfiler(self.tick_size, self.value_area_pct)
+            if self.profile_type == "volume"
+            else MarketProfiler(self.tick_size, self.value_area_pct)
+        )
+
+        # -------- state containers ----------------------------------- #
+        self.value_areas: Dict[str, Dict] = {s: {} for s in self.symbols}
+        self.last_trade_time: Dict[str, pd.Timestamp] = {}
+        self.dip_started: Dict[str, pd.Timestamp] = {}
+        self.skip_day: Dict[str, pd.Timestamp] = {}
+        self.active_trades: Dict[str, Dict] = {}
+
+        # LOGGING: Log all parameters at startup for easy run analysis
+        self.log_parameters()
+
+    def log_parameters(self):
+        """Helper to log all strategy parameters."""
+        params_to_log = {
+            "Symbols": f"{len(self.symbols)} loaded" + (f" from {self.symbol_whitelist}" if self.symbol_whitelist else ""),
+            "Time Window": f"{self.entry_start_time.isoformat()} - {self.entry_end_time.isoformat()}",
+            "Exit Time": self.exit_time.isoformat(),
+            "Cooldown Period (minutes)": self.cooldown_period.total_seconds() / 60,
+            "Lookback Days": self.lookback_days,
+            "Value Area %": self.value_area_pct,
+            "Confirmation Minutes": self.confirm_minutes,
+            "ATR Stop Multiplier": self.atr_stop_mult,
+            "Gap Skip Threshold (ATRs)": self.gap_skip_thresh,
+            "Allowed Shapes": list(self.allowed_shapes),
+            "Min Dip (ticks)": self.min_dip_ticks,
+            "Min Reward/Risk Ratio": self.min_rr,
+            "Risk Per Trade %": self.risk_pct,
+            "Liquidity Cap %": self.liquidity_cap_pct,
+            "Tick Size": self.tick_size,
+            "Profile Engine": self.profile_type,
+        }
+        # Pretty print the parameters to the log
+        log_message = "Strategy Initialized with Parameters:\n"
+        log_message += json.dumps(params_to_log, indent=2)
+        self.logger.info(log_message)
+
+
+    # ------------------------------------------------------------------ #
     def get_required_lookback(self) -> int:
-        return 2
+        """Yesterday + N-day lookback."""
+        return self.lookback_days + 1
 
-    def on_market_open(self, historical_data: dict[str, pd.DataFrame]):
-        self.logger.info("--- New Session ---")
-        self.candidates.clear()
-        self.active_trades.clear()
-        self.todays_traded.clear()
-        self.session_dataframes.clear()
-        self.watchlist.clear()
+    # ------------------------------------------------------------------ #
+    # Session-prep                                                       #
+    # ------------------------------------------------------------------ #
+    def on_market_open(self, historical_data: Dict[str, pd.DataFrame]):
+        self.logger.info(
+            "Starting pre-market value area calculation using %s…",
+            self._profiler.__class__.__name__,
+        )
+        t_start = perf_timer.perf_counter()
 
-        if self.use_symbol_file and self.symbol_file:
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            filepath = os.path.join(project_root, self.symbol_file)
-            try:
-                with open(filepath, 'r') as f:
-                    self.watchlist = {line.strip().upper() for line in f if line.strip()}
-                self.logger.info(f"Loaded {len(self.watchlist)} symbols from watchlist file: {filepath}")
-            except FileNotFoundError:
-                self.logger.error(f"Watchlist file not found at {filepath}. No symbols will be traded.")
-        elif self.use_symbol_file:
-            self.logger.warning("`use_symbol_file` is true but `symbol_file` is not specified in config.")
+        symbols_processed = 0
+        for sym, df in historical_data.items():
+            if self.symbol_whitelist and sym not in self.symbol_whitelist:
+                continue
 
+            t_sym_start = perf_timer.perf_counter()
+
+            if df.empty:
+                self.logger.warning("%s | Historical data is empty, skipping.", sym)
+                continue
+
+            daily = df.resample("1D").agg({"high": "max", "low": "min", "close": "last"})
+            atr_series = calculate_atr(daily, period=5)
+            atr_by_date = pd.Series(atr_series.values, index=atr_series.index.date)
+
+            for d, day_df in df.groupby(df.index.date):
+                day_df["close"]  = pd.to_numeric(day_df["close"],  errors="coerce")
+                day_df["volume"] = pd.to_numeric(day_df["volume"], errors="coerce")
+                day_df = day_df.dropna(subset=["close", "volume"])
+                if day_df.empty:
+                    continue
+
+                stats = self._profiler.calculate(day_df)
+                if not stats:
+                    self.logger.warning("%s | Profile calculation failed for date %s", sym, d)
+                    # rescue: crude VAL/VAH = VWAP ± 0.5×(session range)
+                    sess_range = day_df['high'].max() - day_df['low'].min()
+                    if sess_range > 0:
+                        mid = (day_df['high'].max() + day_df['low'].min()) / 2
+                        stats = {
+                            'poc_price': mid,
+                            'value_area_high': mid + sess_range * 0.25,
+                            'value_area_low':  mid - sess_range * 0.25,
+                            'shape': 'T',
+                        }
+                    else:
+                        continue
+
+                self.value_areas[sym][d] = {
+                    "VAH":   stats["value_area_high"],
+                    "VAL":   stats["value_area_low"],
+                    "POC":   stats["poc_price"],
+                    "VWAP":  (day_df["close"] * day_df["volume"]).sum()
+                             / max(day_df["volume"].sum(), 1),
+                    "shape": stats.get("shape", "D").upper(),
+                    "ATR":   float(atr_by_date.get(d, float("nan"))),
+                    "y_close": day_df["close"].iloc[-1],
+                }
+                # ---------------- DEBUG: confirm we stored yesterday's levels ----------------
+                if d == (df.index.date[-1] - timedelta(days=1)):   # only print for yesterday
+                    # FIXED: Changed undefined variables 'shape' and 'atr_val' to their correct dictionary accessors
+                    self.logger.debug(
+                        "%s | stored levels for %s  shape=%s ATR=%.2f",
+                        sym, d, self.value_areas[sym][d]['shape'], self.value_areas[sym][d]['ATR']
+                    )
+
+            t_sym_end = perf_timer.perf_counter()
+            self.logger.info(
+                "%s | Profile calculations complete in %.4f seconds", sym, t_sym_end - t_sym_start
+            )
+            symbols_processed += 1
+
+        t_end = perf_timer.perf_counter()
+        self.logger.info(
+            "Pre-market calculations for %d symbols finished in %.2f seconds.",
+            symbols_processed,
+            t_end - t_start,
+            )
+
+    # ------------------------------------------------------------------ #
+    # Helpers                                                            #
+    # ------------------------------------------------------------------ #
+    def _position_size(self, entry: float, stop: float) -> int:
+        risk_per_share = max(entry - stop, self.tick_size)
+        eq = self.ledger.get_total_equity(self.current_prices)
+        by_risk = int((eq * self.risk_pct) / risk_per_share)
+        by_liq  = int((eq * self.liquidity_cap_pct) / entry)
+        return max(1, min(by_risk, by_liq))
+
+    # ------------------------------------------------------------------ #
+    # Intraday logic                                                     #
+    # ------------------------------------------------------------------ #
     def on_bar(self, symbol: str, bar: pd.Series):
-        if self.use_symbol_file and symbol not in self.watchlist:
+        if self.symbol_whitelist and symbol not in self.symbol_whitelist:
             return
-
         super().on_bar(symbol, bar)
 
-        if symbol not in self.session_dataframes:
-            self.session_dataframes[symbol] = pd.DataFrame([bar], index=[bar.name])
-        else:
-            self.session_dataframes[symbol].loc[bar.name] = bar
+        today = bar.name.date()
+        now   = bar.name.time()
 
-        if symbol in self.active_trades:
-            self._manage_active_trade(symbol, bar)
+        # ---- skip-day enforcement
+        if self.skip_day.get(symbol) == today:
             return
 
-        if symbol not in self.candidates:
-            self.candidates[symbol] = {'val_fail_state': 'watch'}
-
-        ny_time = bar.name.tz_convert(self.timezone).time()
-        if not (self.entry_start_time <= ny_time <= self.entry_end_time):
-            return
-
-        if len(self.session_dataframes[symbol]) < 30:
-            return
-
-        session_df = self.session_dataframes[symbol]
-        profiler = VolumeProfiler(tick_size=self.tick_size, value_area_pct=self.value_area_pct)
-        profile = profiler.calculate(session_df)
-
-        if not profile: return
-
-        val = profile['value_area_low']
-        vah = profile['value_area_high']
-        poc = profile['poc_price']
-
-        self._scan_for_val_fail_long(symbol, bar, val, poc, vah)
-
-    def _scan_for_val_fail_long(self, symbol: str, bar: pd.Series, val: float, poc: float, vah: float):
-        trade_key = (symbol, bar.name.date(), 'val_fail_long')
-        if trade_key in self.todays_traded:
-            return
-
-        state = self.candidates[symbol].get('val_fail_state', 'watch')
-
-        if state == 'watch':
-            dip_threshold = val - (self.tick_size * self.min_dip_ticks)
-            if bar['close'] < dip_threshold:
-                self.logger.info(f"  [ARMED LONG] {symbol} dipped below VAL {val:.2f} at {bar.name.time()}.")
-                self.candidates[symbol]['val_fail_state'] = 'armed'
-                self.candidates[symbol]['extension_bar_low'] = bar['low']
-                self.candidates[symbol]['armed_time'] = bar.name
-
-        elif state == 'armed':
-            if bar.name > self.candidates[symbol]['armed_time'] + self.confirmation_window:
-                self.candidates[symbol]['val_fail_state'] = 'watch'
-                return
-
-            if bar['close'] >= val:
-                entry_price = bar['close']
-                extension_low = self.candidates[symbol]['extension_bar_low']
-                stop_loss_price = extension_low - (self.tick_size * self.stop_buffer_ticks)
-                profit_target = poc if self.primary_target == 'poc' else vah
-
-                potential_risk = entry_price - stop_loss_price
-                if potential_risk <= 0:
-                    self.candidates[symbol]['val_fail_state'] = 'watch'
+        # ---- gap check (once at open)
+        if now == self.session_open_time and symbol not in self.skip_day:
+            yday = today - timedelta(days=1)
+            lv = self.value_areas.get(symbol, {}).get(yday)
+            if lv and pd.notna(lv["ATR"]):
+                if abs(bar["open"] - lv["y_close"]) / lv["ATR"] >= self.gap_skip_thresh:
+                    self.skip_day[symbol] = today
+                    self.logger.info("%s | REJECT: Opening gap is >= %.1f ATRs. Skipping day.", symbol, self.gap_skip_thresh)
                     return
 
-                potential_reward = abs(profit_target - entry_price)
-                reward_risk_ratio = potential_reward / potential_risk
+        # ---- yesterday levels
+        yday = today - timedelta(days=1)
+        lv = self.value_areas.get(symbol, {}).get(yday)
+        if not lv or pd.isna(lv["ATR"]):
+            return # Cannot trade without yesterday's levels, this is a fundamental requirement.
 
-                if reward_risk_ratio >= self.min_reward_risk_ratio:
-                    self.logger.info(f"  [CONFIRMED LONG] {symbol} R:R {reward_risk_ratio:.2f} >= {self.min_reward_risk_ratio}. Executing trade.")
-                    self._execute_fade_trade(symbol, bar, stop_loss_price, profit_target)
-                    self.todays_traded.add(trade_key)
-                    self.candidates[symbol]['val_fail_state'] = 'trade_taken'
-                else:
-                    self.logger.info(f"  [REJECTED] {symbol} trade rejected due to poor R:R of {reward_risk_ratio:.2f}.")
-                    self.candidates[symbol]['val_fail_state'] = 'watch'
+        # DEBUG: show yesterday’s stats once per symbol per day
+        if symbol not in getattr(self, "_dbg_printed", set()):
+            self._dbg_printed = getattr(self, "_dbg_printed", set())
+            self.logger.info(
+                "%s | %s | VAL=%.2f VAH=%.2f POC=%.2f ATR=%.2f shape=%s",
+                symbol, yday, lv['VAL'], lv['VAH'], lv['POC'], lv['ATR'], lv['shape']
+            )
+            self._dbg_printed.add(symbol)
 
-    def _execute_fade_trade(self, symbol: str, bar: pd.Series, stop_loss_price: float, profit_target: float):
-        entry_price = bar['close']
-        risk_per_share = entry_price - stop_loss_price
+        # BOTTLENECK 1: Is yesterday's profile shape allowed?
+        if lv["shape"] not in self.allowed_shapes:
+            # self.logger.info("%s | REJECT: Previous day shape '%s' not in allowed shapes %s", symbol, lv["shape"], self.allowed_shapes)
+            return
 
-        quantity = self._calculate_quantity(entry_price, risk_per_share, bar['volume'])
-        if quantity == 0: return
+        # BOTTLENECK 2: Is the symbol in a post-trade cooldown period?
+        if symbol in self.last_trade_time and bar.name - self.last_trade_time[symbol] < self.cooldown_period:
+            # self.logger.info("%s | REJECT: In cooldown period.", symbol)
+            return
 
-        if self.ledger.record_trade(bar.name, symbol, quantity, entry_price, 'BUY', self.current_prices):
-            self.active_trades[symbol] = {
-                'entry_price': entry_price,
-                'stop_loss': stop_loss_price,
-                'profit_target': profit_target,
-                'quantity': quantity,
-                'risk_per_share': risk_per_share,
-                'path': 'val_fail_long'
-            }
-            self.logger.info(f"  [ENTRY] {symbol} (VAL Fade) @ {entry_price:.2f} | Target: {profit_target:.2f} | SL: {stop_loss_price:.2f}")
+        # ---- dip detection & confirmation
+        below_val = bar["close"] < lv["VAL"] - self.min_dip_ticks * self.tick_size
+        if below_val and symbol not in self.dip_started:
+            self.dip_started[symbol] = bar.name
+            # DEBUG: first tick below VAL
+            self.logger.info(
+                "%s | %s | below VAL %.2f at %.2f", symbol, bar.name.time(), lv['VAL'], bar['close']
+            )
+        elif not below_val and symbol in self.dip_started:
+            # DEBUG: dip aborted
+            self.logger.info(
+                "%s | %s | back above VAL (dip aborted)", symbol, bar.name.time()
+            )
+            self.dip_started.pop(symbol, None)
 
-    def _calculate_quantity(self, entry_price, risk_per_share, bar_volume):
-        equity = self.ledger.get_total_equity(self.current_prices)
-        dollar_risk = equity * self.risk_per_trade_pct
-        if risk_per_share <= 0: return 0
+        confirm_ok = True
+        if self.confirm_minutes > 0:
+            confirm_ok = (
+                    symbol in self.dip_started
+                    and (bar.name - self.dip_started[symbol]).seconds >= self.confirm_minutes * 60
+            )
 
-        quantity_by_risk = int(dollar_risk / risk_per_share)
-        quantity_by_liquidity = int(bar_volume * self.liquidity_cap_pct)
-        if quantity_by_liquidity == 0 and bar_volume > 0:
-            quantity_by_liquidity = 1
+        # ==============================================================
+        # ENTRY
+        # ==============================================================
+        if (
+                self.entry_start_time <= now <= self.entry_end_time
+                and below_val
+                and confirm_ok
+                and symbol not in self.ledger.open_positions
+        ):
+            stop_price = bar["close"] - self.atr_stop_mult * lv["ATR"]
 
-        return min(quantity_by_risk, quantity_by_liquidity)
+            # BOTTLENECK 3: Is the calculated stop price valid?
+            if stop_price >= bar["close"]:
+                self.logger.info(
+                    "%s | %s | STOP_TOO_TIGHT close=%.2f stop=%.2f ATR=%.2f mult=%.2f",
+                    symbol, bar.name.time(), bar['close'], stop_price, lv['ATR'], self.atr_stop_mult
+                )
+                return
 
-    def _manage_active_trade(self, symbol: str, bar: pd.Series):
-        trade = self.active_trades.get(symbol)
-        if not trade: return
+            risk = bar["close"] - stop_price
+            target_price = max(lv["POC"], bar["close"] + risk * 1.5)
+            rr = (target_price - bar["close"]) / risk
 
-        if not trade.get('is_breakeven', False):
-            breakeven_trigger = trade['entry_price'] + (trade['risk_per_share'] * self.breakeven_trigger_r)
-            if bar['high'] >= breakeven_trigger:
-                trade.update({'stop_loss': trade['entry_price'], 'is_breakeven': True})
-                self.logger.info(f"  [MOVE TO BREAKEVEN] {symbol} stop moved to {trade['stop_loss']:.2f}")
+            # BOTTLENECK 4: Is the Reward/Risk ratio sufficient?
+            if rr < self.min_rr:
+                self.logger.info(
+                    "%s | %s | RR_TOO_LOW rr=%.2f target=%.2f stop=%.2f",
+                    symbol, bar.name.time(), rr, target_price, stop_price
+                )
+                return
 
-        exit_price, reason = None, None
-        if bar['low'] <= trade['stop_loss']:
-            exit_price, reason = trade['stop_loss'], "Stop Loss"
-        elif bar['high'] >= trade.get('profit_target', float('inf')):
-            exit_price, reason = trade['profit_target'], "Profit Target"
+            qty = self._position_size(bar["close"], stop_price)
+            if qty == 0:
+                return
 
-        ny_time = bar.name.tz_convert(self.timezone).time()
-        if not exit_price and ny_time >= time(15, 50):
-            exit_price, reason = bar['close'], "End of Day"
+            if self.ledger.record_trade(
+                    timestamp=bar.name,
+                    symbol=symbol,
+                    quantity=qty,
+                    price=bar["close"],
+                    order_type="BUY",
+                    market_prices=self.current_prices,
+            ):
+                self.active_trades[symbol] = {"stop": stop_price, "target": target_price}
+                self.last_trade_time[symbol] = bar.name
+                self.logger.info(
+                    f"{bar.name} | {symbol} | LONG {qty}@{bar['close']:.2f} "
+                    f"TG:{target_price:.2f} SL:{stop_price:.2f}"
+                )
 
-        if exit_price and reason:
-            self.logger.info(f"  [EXIT] {symbol} ({trade['path']}) @ {exit_price:.2f} ({reason})")
-            self.ledger.record_trade(bar.name, symbol, trade['quantity'], exit_price, 'SELL', self.current_prices, exit_reason=reason)
-            del self.active_trades[symbol]
+        # ==============================================================
+        # EXIT management
+        # ==============================================================
+        if symbol in self.ledger.open_positions and symbol in self.active_trades:
+            pos   = self.ledger.open_positions[symbol]
+            trade = self.active_trades[symbol]
+
+            hit_stop   = bar["close"] <= trade["stop"]
+            hit_target = bar["close"] >= trade["target"]
+            eod        = now >= self.exit_time
+
+            if hit_stop or hit_target or eod:
+                reason = "SL" if hit_stop else "TP" if hit_target else "EOD"
+                qty = pos["quantity"]
+
+                self.ledger.record_trade(
+                    timestamp=bar.name,
+                    symbol=symbol,
+                    quantity=qty,
+                    price=bar["close"],
+                    order_type="SELL",
+                    market_prices=self.current_prices,
+                    exit_reason=reason,
+                )
+                self.active_trades.pop(symbol, None)
+                self.logger.info(
+                    f"{bar.name} | {symbol} | EXIT {qty}@{bar['close']:.2f} ({reason})"
+                )
+
+    # ------------------------------------------------------------------
+    def on_session_end(self):
+        """No end-of-day actions yet."""
+        pass

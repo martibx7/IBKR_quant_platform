@@ -1,123 +1,124 @@
-# config.yaml
-
+# -------------------------------------------------
+#  config.yaml   —   unified & UTF-8-clean
+# -------------------------------------------------
 backtest:
   initial_cash: 100000
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
-  slippage_model: 'percentage'  # Options: 'percentage' or 'none'
-  slippage_pct: 0.0005          # e.g., 0.0005 is 0.05%
-  # symbol_file: 'strategies/sp_500.txt' # Commented out or leave blank to disable
+  slippage_model: 'percentage'   # 'percentage' | 'none'
+  slippage_pct: 0.0005           # 0 .05 %
+  # symbol_file: 'strategies/sp_500.txt'
 
-# --- Select your data source ---
+# ------------------ data source ------------------
 database:
-  type: 'postgresql' # 'postgresql' or 'sqlite'
-  # --- PostgreSQL Settings ---
+  type: 'postgresql'              # 'postgresql' | 'sqlite'
   host: 'localhost'
   port: 5433
   user: 'quantuser'
   password: 'quantpassword'
   dbname: 'quant_platform'
-  # --- SQLite Settings ---
-  db_path: 'data/price_data.db' # Use this if type is 'sqlite'
+  db_path: 'data/price_data.db'   # used only if type == sqlite
 
+# ------------------ strategies -------------------
 strategy:
-  # Set the active strategy here.
-  name: 'ValueAreaFadeStrategy' # <--- CHANGE THIS LINE TO USE A NEW STRATEGY
-
-  # --- All strategy parameters are defined below ---
+  name: 'ValueAreaFadeStrategy'   # active strategy
   parameters:
 
+    # -- Volume-Accumulation (unchanged) ----------
     VolumeAccumulationStrategy:
-      # General strategy settings
       log_file: 'logs/volume_accumulation_v3.log'
       timezone: 'America/New_York'
       risk_per_trade_pct: 0.01
       min_price: 3.00
       max_price: 400.00
-
-      # --- Main Strategy Path: Consolidation Retest ---
       consolidation_days: 10
       consolidation_range_pct: 0.15
       poc_midpoint_tolerance_pct: 0.25
-      retest_confirmation_bars: 1     # Number of consecutive bars to close above retest level
+      retest_confirmation_bars: 1
       value_area_pct: 0.70
       stop_loss_poc_buffer_pct: 0.02
       min_stop_loss_ticks: 6
-      liquidity_cap_pct: 0.02   # Maximum 2% of equity in a single trade
+      liquidity_cap_pct: 0.02
       profit_target_r: 1.75
-      breakeven_trigger_r: .75
+      breakeven_trigger_r: 0.75
       entry_time_window:
         start: '10:00:00'
-        end: '14:00:00'
-
-      # --- Relative Volume Check Parameters ---
+        end:   '14:00:00'
       enable_relative_volume_check: false
       relative_volume_lookback: 20
       relative_volume_ratio: 2
-
-      # --- Optional Secondary Path: Open-Drive ---
       enable_open_drive: false
       open_drive_r_target: 3
       vwap_stop_pct: 0.01
 
-        # In config.yaml, under strategy.parameters
+    # -- Value-Area Fade  -----------
+    ValueAreaFadeStrategy:
+      log_file: 'logs/value_area_fade.log'
+      timezone: 'America/New_York'
 
-      ValueAreaFadeStrategy:
-        log_file: 'logs/value_area_fade_v2.log'
-        timezone: 'America/New_York'
+      # -------- profile settings
+      profile_type: 'volume'          # 'volume' | 'market'
 
-        # --- Risk and Sizing ---
-        risk_per_trade_pct: 0.01
-        liquidity_cap_pct: 0.05
+      # -------- watch-list
+      use_symbol_file: true
+      symbol_file: 'strategies/sp_500.txt'   # one ticker per line
 
-        # --- Core Strategy Logic ---
-        value_area_pct: 0.70
-        confirmation_window_minutes: 5
-        primary_target: 'poc'
+      # -------- session timing
+      session_open_time: '09:30:00'   # used for gap-size check
+      entry_time_window:
+        start: '10:00:00'
+        end:   '15:00:00'
+      exit_time: '15:55:00'
+      cooldown:
+        minutes: 30
 
-        # --- NEW: Quality & Refinement Filters ---
-        entry_time_window:
-          start: '10:00:00'
-          end: '15:00:00'
-        min_dip_ticks: 3           # Price must close at least 3 ticks below VAL to arm
-        min_reward_risk_ratio: 1.0 # The potential reward must be >= 1.0x the risk
+      # -------- calculations & filters
+      tick_size: 0.01                 # still used for min_dip_ticks math
+      lookback_days: 20
+      value_area_pct: 0.70
+      confirmation_window_minutes: 0
+      primary_target: 'poc'
+      min_dip_ticks: 0
+      min_reward_risk_ratio: 1.2
 
-        # --- Trade Management ---
-        stop_buffer_ticks: 2
-        breakeven_trigger_r: 0.75
+      # --- NEW volatility / structure controls
+      atr_stop_mult: 0.7              # stop = entry − 0.5 × ATR
+      gap_skip_threshold: 2.0         # skip day if open gap ≥ 1 ATR
+      allowed_shapes: ['D', 'B', 'P', 'b']           # only trade after D-profile days
 
-        # --- Watchlist Settings ---
-        use_symbol_file: true
-        symbol_file: 'strategies/sp_500.txt'
+      # -------- risk / sizing
+      risk_per_trade_pct: 0.01
+      liquidity_cap_pct: 0.05
 
+
+    # -- everything below is EXACTLY as before ----
     ConsolidationScreenerStrategy:
       log_file: 'logs/consolidation_screener.log'
       min_price: 2.00
       max_price: 100.00
       consolidation_days: 10
-      consolidation_range_pct: 0.07   # Use your desired value here
-      breakout_volume_ratio: 1.5      # Use your desired value here
+      consolidation_range_pct: 0.07
+      breakout_volume_ratio: 1.5
 
     OpenRejectionReverseStrategy:
-      profile_type: 'volume' # Choose 'volume' or 'market' for the profiler
+      profile_type: 'volume'
       log_file: 'logs/open_rejection_reverse.log'
-      risk_per_trade_pct: 0.01      # Risk 1% of total equity per trade
-      max_allocation_pct: 0.25      # Never allocate more than 25% of equity to a single trade
-      take_profit_r: 2.5            # Take profit at 2.5x the initial risk
-      trailing_stop_r: 1.0          # Start trailing the stop with the POC once the trade reaches 1R in profit
-      min_daily_volume: 500000      # Minimum 500k shares traded on the previous day
-      min_prev_day_range_pct: 0.03  # Previous day's range must be at least 3% to be a candidate
+      risk_per_trade_pct: 0.01
+      max_allocation_pct: 0.25
+      take_profit_r: 2.5
+      trailing_stop_r: 1.0
+      min_daily_volume: 500000
+      min_prev_day_range_pct: 0.03
       timezone: 'America/New_York'
-      # symbols: ['AAPL', 'GOOG']     # uncomment to use specific symbols
 
     OpenDriveMomentumStrategy:
       log_file: 'logs/open_drive_momentum.log'
-      risk_per_trade: 0.01
+      risk_per_trade_pct: 0.01
       max_allocation_pct: 0.25
       min_risk_per_share: 0.05
       entry_time: '10:00:00'
-      exit_time: '15:55:00'
+      exit_time:  '15:55:00'
       timezone: 'America/New_York'
 
     SimpleMomentumStrategy:
@@ -127,20 +128,20 @@ strategy:
 
     ValueMigrationStrategy:
       log_file: 'logs/value_migration.log'
-      risk_per_trade_pct: 0.02      # Risk 2% of total equity per trade
-      max_allocation_pct: 0.25      # Never allocate more than 25% of equity to a single trade
+      risk_per_trade_pct: 0.02
+      max_allocation_pct: 0.25
       timezone: 'America/New_York'
       min_price: 2.0
       max_price: 30.0
-      max_daily_trades: 10 # Limit the number of trades per d
+      max_daily_trades: 10
 
     SimplePocCrossStrategy:
       trade_quantity: 100
       lookback_period: 15
       hold_period: 20
 
-    MeanReversionVolumeStrategy: # <--- ADD THIS NEW SECTION
-      log_file: 'logs/mean_reversion_volume.log' # You might want to adjust this path
+    MeanReversionVolumeStrategy:
+      log_file: 'logs/mean_reversion_volume.log'
       sma_period: 20
       atr_period: 14
       deviation_multiplier: 1.5
@@ -148,22 +149,16 @@ strategy:
       risk_per_trade_pct: 0.01
       max_allocation_pct: 0.20
       stop_loss_pct: 0.015
-      entry_time: '09:45:00' # Adjusted slightly later to ensure data stability
-      exit_time: '15:50:00'
+      entry_time: '09:45:00'
+      exit_time:  '15:50:00'
       timezone: 'America/New_York'
-      # symbols: ['SPY'] # Uncomment to test with a single symbol like SPY if you have data
 
-
+# ------------------ fee model --------------------
 fees:
-  # Available models: 'zero', 'fixed', 'tiered'
-  model: 'tiered'
-
-  # Settings for the 'tiered' model
+  model: 'tiered'                 # 'zero' | 'fixed' | 'tiered'
   tiered:
-    min_trade_fee: 0.35          # Minimum fee per trade
-    fee_per_share: 0.0035          # Cost per share
-    max_fee_pct_of_trade: 0.01   # Fee cannot exceed 0.5% of the trade value
-
-  # Settings for the 'fixed' model
+    min_trade_fee: 0.35
+    fee_per_share: 0.0035
+    max_fee_pct_of_trade: 0.01
   fixed:
-    trade_fee: 1.00 # A flat $1 per trade
+    trade_fee: 1.00

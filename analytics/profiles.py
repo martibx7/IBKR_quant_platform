@@ -37,7 +37,6 @@ class VolumeProfiler:
     """
     Calculates a Volume Profile using a fast, vectorized algorithm.
     """
-    # --- CHANGED: Added value_area_pct parameter ---
     def __init__(self, tick_size: float, value_area_pct: float = 0.70):
         self.tick_size = tick_size
         self.value_area_pct = value_area_pct
@@ -73,6 +72,26 @@ class VolumeProfiler:
 
         return pd.Series(dist, index=levels)
 
+    @staticmethod
+    def _classify_shape(vd: pd.Series, poc: float) -> str:
+        """Return 'D', 'P', 'b', 'B', or 'T' for yesterday’s profile."""
+        total = vd.sum()
+        if total == 0:
+            return "T"
+
+        upper = vd[vd.index > poc].sum()
+        lower = vd[vd.index < poc].sum()
+        tail_ratio = abs(upper - lower) / total
+
+        if tail_ratio < 0.10:
+            return "D"
+
+        peaks = vd.sort_values(ascending=False).head(3).index
+        if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * vd.index.to_series().diff().median():
+            return "B"
+
+        return "P" if upper > lower else "b"
+
     def calculate(self, df: pd.DataFrame) -> dict | None:
         vd = self._calculate_distribution(df)
         if vd.empty or vd.sum() == 0:
@@ -81,16 +100,17 @@ class VolumeProfiler:
         tv  = vd.sum()
         sv  = vd.sort_values(ascending=False)
         cum = sv.cumsum()
-        # --- CHANGED: Use the value_area_pct parameter ---
         va_limit = tv * self.value_area_pct
         va_sv    = sv[cum <= va_limit]
         if va_sv.empty:
             va_sv = sv.head(1)
         prices = va_sv.index
+        shape  = self._classify_shape(vd, poc)
         return {
             'poc_price':        poc,
             'value_area_high':  prices.max(),
-            'value_area_low':   prices.min()
+            'value_area_low':   prices.min(), # FIXED: Added missing comma
+            'shape':            shape,
         }
 
     def calculate_full_profile_for_plotting(self, df: pd.DataFrame) -> pd.Series:
@@ -100,11 +120,25 @@ class MarketProfiler:
     """
     Calculates a comprehensive Market Profile (TPO) using a vectorized approach.
     """
-    # --- CHANGED: Added value_area_pct parameter ---
     def __init__(self, tick_size: float = 0.05, value_area_pct: float = 0.70):
         self.tick_size   = tick_size
         self.value_area_pct = value_area_pct
         self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
+
+    @staticmethod
+    def _classify_shape(counts: pd.Series, poc: float) -> str:
+        total = counts.sum()
+        if total == 0:
+            return "T"
+        upper = counts[counts.index > poc].sum()
+        lower = counts[counts.index < poc].sum()
+        tail_ratio = abs(upper - lower) / total
+        if tail_ratio < 0.10:
+            return "D"
+        peaks = counts.sort_values(ascending=False).head(3).index
+        if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * counts.index.to_series().diff().median():
+            return "B"
+        return "P" if upper > lower else "b"
 
     def calculate(self, df: pd.DataFrame) -> dict | None:
         if df.empty or not isinstance(df.index, pd.DatetimeIndex):
@@ -116,9 +150,14 @@ class MarketProfiler:
             return None
 
         profile_dict = tpo_series.to_dict()
-        poc, vah, val = self._calculate_poc_and_value_area(profile_dict)
+        # FIXED: Unpack all four values, including the 'shape'
+        poc, vah, val, shape = self._calculate_poc_and_value_area(profile_dict)
 
-        return {'poc_price': poc, 'value_area_high': vah, 'value_area_low': val}
+        # FIXED: Add check to handle cases where profile calculation fails
+        if poc is None:
+            return None
+
+        return {'poc_price': poc, 'value_area_high': vah, 'value_area_low': val, 'shape': shape}
 
     def _calculate_tpo_profile_vectorized(self, df: pd.DataFrame):
         """Calculates the TPO profile using a vectorized approach."""
@@ -150,13 +189,15 @@ class MarketProfiler:
         return tpo_profile
 
     def _calculate_poc_and_value_area(self, profile: dict) -> tuple:
-        """Calculates POC and Value Area from a profile dictionary."""
-        if not profile: return (None, None, None)
+        """Calculates POC, Value Area, and shape from a profile dictionary."""
+        # FIXED: Return tuple of four Nones for consistency
+        if not profile: return (None, None, None, None)
 
         counts = pd.Series({p: len(v) for p, v in profile.items()})
         poc    = counts.idxmax()
+        shape = self._classify_shape(counts, poc) # 'shape' is calculated here
+
         total  = counts.sum()
-        # --- CHANGED: Use the value_area_pct parameter ---
         target = total * self.value_area_pct
         current = counts[poc]
         prices = [poc]
@@ -184,4 +225,5 @@ class MarketProfiler:
             else:
                 break
 
-        return poc, max(prices), min(prices)
+        # FIXED: Return the calculated 'shape' along with other values
+        return poc, max(prices), min(prices), shape

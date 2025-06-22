@@ -20,8 +20,10 @@ import json # LOGGING: To format parameters
 import pandas as pd
 
 from strategies.base import BaseStrategy
-from analytics.profiles import VolumeProfiler, MarketProfiler
+from analytics.profiles import VolumeProfiler, MarketProfiler, get_session_times
 from analytics.indicators import calculate_atr
+# --- NEW: Import the relative volume function ---
+from analytics.relative_volume import has_high_relative_volume
 
 
 class ValueAreaFadeStrategy(BaseStrategy):
@@ -83,6 +85,14 @@ class ValueAreaFadeStrategy(BaseStrategy):
         self.min_dip_ticks   = params.get("min_dip_ticks", 3)
         self.min_rr          = params.get("min_reward_risk_ratio", 1.0)
 
+        # --- NEW: VWAP filter parameter ---
+        self.use_vwap_filter = params.get("use_vwap_filter", False)
+
+        # --- NEW: Relative Volume filter parameters ---
+        rel_vol_params = params.get("relative_volume_filter", {})
+        self.use_rel_vol_filter = rel_vol_params.get("enable", False)
+        self.rel_vol_ratio      = rel_vol_params.get("ratio_threshold", 2.0)
+
         # -------- risk / sizing -------------------------------------- #
         self.risk_pct          = params.get("risk_per_trade_pct", 0.01)
         self.liquidity_cap_pct = params.get("liquidity_cap_pct", 0.05)
@@ -93,6 +103,11 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 "tick_size_market_profile",
                 self.config.get("backtest", {}).get("tick_size_volume_profile", 0.01),
             )
+        )
+
+        # -------- ATR period ----------------------------------------- #
+        self.atr_period = int(
+            self.config.get("backtest", {}).get("atr_period", 14)
         )
 
         # -------- profile engine ------------------------------------- #
@@ -111,6 +126,9 @@ class ValueAreaFadeStrategy(BaseStrategy):
         self.dip_started: Dict[str, pd.Timestamp] = {}
         self.skip_day: Dict[str, pd.Timestamp] = {}
         self.active_trades: Dict[str, Dict] = {}
+        self.intraday_vwap_data: Dict[str, Dict] = {}
+        self.hist_cum_vol: Dict[str, Dict[pd.Timestamp, pd.Series]] = {}
+        self.todays_bars: Dict[str, pd.DataFrame] = {}
 
         # LOGGING: Log all parameters at startup for easy run analysis
         self.log_parameters()
@@ -134,6 +152,9 @@ class ValueAreaFadeStrategy(BaseStrategy):
             "Liquidity Cap %": self.liquidity_cap_pct,
             "Tick Size": self.tick_size,
             "Profile Engine": self.profile_type,
+            "Use VWAP Filter": self.use_vwap_filter,
+            "Use Relative Volume Filter": self.use_rel_vol_filter,
+            "Relative Volume Ratio": self.rel_vol_ratio
         }
         # Pretty print the parameters to the log
         log_message = "Strategy Initialized with Parameters:\n"
@@ -150,6 +171,10 @@ class ValueAreaFadeStrategy(BaseStrategy):
     # Session-prep                                                       #
     # ------------------------------------------------------------------ #
     def on_market_open(self, historical_data: Dict[str, pd.DataFrame]):
+        # --- NEW: Reset daily data containers ---
+        self.intraday_vwap_data = {}
+        self.todays_bars = {}
+
         self.logger.info(
             "Starting pre-market value area calculation using %s…",
             self._profiler.__class__.__name__,
@@ -158,7 +183,7 @@ class ValueAreaFadeStrategy(BaseStrategy):
 
         symbols_processed = 0
         for sym, df in historical_data.items():
-            if self.symbol_whitelist and sym not in self.symbol_whitelist:
+            if sym not in self.symbols:
                 continue
 
             t_sym_start = perf_timer.perf_counter()
@@ -167,30 +192,43 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 self.logger.warning("%s | Historical data is empty, skipping.", sym)
                 continue
 
-            daily = df.resample("1D").agg({"high": "max", "low": "min", "close": "last"})
-            atr_series = calculate_atr(daily, period=5)
+            # --- Get RTH session times ---
+            session_start, session_end = get_session_times('regular')
+
+            # --- NEW: Pre-calculate historical cumulative volume profiles ---
+            if self.use_rel_vol_filter:
+                self.hist_cum_vol[sym] = {}
+                for d, day_df in df.groupby(df.index.date):
+                    rth_day_df = day_df.between_time(session_start, session_end)
+                    if not rth_day_df.empty:
+                        self.hist_cum_vol[sym][d] = rth_day_df['volume'].cumsum()
+
+            # --- Session-Aware ATR Calculation ---
+            atr_session_df = df.between_time(session_start, session_end)
+            daily = atr_session_df.resample("1D").agg(
+                {"high": "max", "low": "min", "close": "last"}
+            ).dropna()
+            atr_series = calculate_atr(daily, period=self.atr_period)
             atr_by_date = pd.Series(atr_series.values, index=atr_series.index.date)
 
+            # --- Session-Aware Profile Calculation ---
             for d, day_df in df.groupby(df.index.date):
-                day_df["close"]  = pd.to_numeric(day_df["close"],  errors="coerce")
-                day_df["volume"] = pd.to_numeric(day_df["volume"], errors="coerce")
-                day_df = day_df.dropna(subset=["close", "volume"])
-                if day_df.empty:
+                rth_day_df = day_df.between_time(session_start, session_end)
+                rth_day_df = rth_day_df.copy()
+                rth_day_df["close"]  = pd.to_numeric(rth_day_df["close"],  errors="coerce")
+                rth_day_df["volume"] = pd.to_numeric(rth_day_df["volume"], errors="coerce")
+                rth_day_df = rth_day_df.dropna(subset=["close", "volume"])
+
+                if rth_day_df.empty:
                     continue
 
-                stats = self._profiler.calculate(day_df)
+                stats = self._profiler.calculate(rth_day_df)
+
                 if not stats:
-                    self.logger.warning("%s | Profile calculation failed for date %s", sym, d)
-                    # rescue: crude VAL/VAH = VWAP ± 0.5×(session range)
-                    sess_range = day_df['high'].max() - day_df['low'].min()
+                    sess_range = rth_day_df['high'].max() - rth_day_df['low'].min()
                     if sess_range > 0:
-                        mid = (day_df['high'].max() + day_df['low'].min()) / 2
-                        stats = {
-                            'poc_price': mid,
-                            'value_area_high': mid + sess_range * 0.25,
-                            'value_area_low':  mid - sess_range * 0.25,
-                            'shape': 'T',
-                        }
+                        mid = (rth_day_df['high'].max() + rth_day_df['low'].min()) / 2
+                        stats = {'poc_price': mid, 'value_area_high': mid + sess_range * 0.25, 'value_area_low':  mid - sess_range * 0.25, 'shape': 'T'}
                     else:
                         continue
 
@@ -198,15 +236,13 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     "VAH":   stats["value_area_high"],
                     "VAL":   stats["value_area_low"],
                     "POC":   stats["poc_price"],
-                    "VWAP":  (day_df["close"] * day_df["volume"]).sum()
-                             / max(day_df["volume"].sum(), 1),
+                    "VWAP":  (rth_day_df["close"] * rth_day_df["volume"]).sum() / max(rth_day_df["volume"].sum(), 1),
                     "shape": stats.get("shape", "D").upper(),
                     "ATR":   float(atr_by_date.get(d, float("nan"))),
-                    "y_close": day_df["close"].iloc[-1],
+                    "y_close": rth_day_df["close"].iloc[-1],
                 }
-                # ---------------- DEBUG: confirm we stored yesterday's levels ----------------
-                if d == (df.index.date[-1] - timedelta(days=1)):   # only print for yesterday
-                    # FIXED: Changed undefined variables 'shape' and 'atr_val' to their correct dictionary accessors
+
+                if d == (df.index.date[-1] - timedelta(days=1)):
                     self.logger.debug(
                         "%s | stored levels for %s  shape=%s ATR=%.2f",
                         sym, d, self.value_areas[sym][d]['shape'], self.value_areas[sym][d]['ATR']
@@ -246,55 +282,55 @@ class ValueAreaFadeStrategy(BaseStrategy):
         today = bar.name.date()
         now   = bar.name.time()
 
-        # ---- skip-day enforcement
-        if self.skip_day.get(symbol) == today:
-            return
+        # --- Efficiently build up the current day's bars for checks ---
+        if symbol not in self.todays_bars or self.todays_bars[symbol].iloc[-1].name.date() != today:
+            self.todays_bars[symbol] = pd.DataFrame([bar])
+        else:
+            self.todays_bars[symbol] = pd.concat([self.todays_bars[symbol], pd.DataFrame([bar])])
 
-        # ---- gap check (once at open)
-        if now == self.session_open_time and symbol not in self.skip_day:
-            yday = today - timedelta(days=1)
-            lv = self.value_areas.get(symbol, {}).get(yday)
-            if lv and pd.notna(lv["ATR"]):
-                if abs(bar["open"] - lv["y_close"]) / lv["ATR"] >= self.gap_skip_thresh:
-                    self.skip_day[symbol] = today
-                    self.logger.info("%s | REJECT: Opening gap is >= %.1f ATRs. Skipping day.", symbol, self.gap_skip_thresh)
-                    return
+        # --- Efficient Intraday VWAP Calculation ---
+        if symbol not in self.intraday_vwap_data or self.intraday_vwap_data[symbol]['date'] != today:
+            self.intraday_vwap_data[symbol] = {'tp_vol': 0, 'vol': 0, 'date': today}
 
-        # ---- yesterday levels
+        typical_price = (bar['high'] + bar['low'] + bar['close']) / 3
+        self.intraday_vwap_data[symbol]['tp_vol'] += typical_price * bar['volume']
+        self.intraday_vwap_data[symbol]['vol'] += bar['volume']
+
+        current_vwap = self.intraday_vwap_data[symbol]['tp_vol'] / self.intraday_vwap_data[symbol]['vol'] if self.intraday_vwap_data[symbol]['vol'] > 0 else 0
+        vwap_ok = (not self.use_vwap_filter) or (bar['close'] > current_vwap)
+
+        # --- Relative Volume Check ---
+        relative_volume_ok = True
+        if self.use_rel_vol_filter:
+            hist_profiles = self.hist_cum_vol.get(symbol, {})
+            relative_volume_ok = has_high_relative_volume(
+                todays_intraday=self.todays_bars[symbol],
+                hist_cum_vol_profiles=hist_profiles,
+                bar_ts=bar.name,
+                ratio_threshold=self.rel_vol_ratio
+            )
+
+        # --- Yesterday's Levels & Filters ---
         yday = today - timedelta(days=1)
         lv = self.value_areas.get(symbol, {}).get(yday)
         if not lv or pd.isna(lv["ATR"]):
-            return # Cannot trade without yesterday's levels, this is a fundamental requirement.
+            return
 
-        # DEBUG: show yesterday’s stats once per symbol per day
-        if symbol not in getattr(self, "_dbg_printed", set()):
-            self._dbg_printed = getattr(self, "_dbg_printed", set())
-            self.logger.info(
-                "%s | %s | VAL=%.2f VAH=%.2f POC=%.2f ATR=%.2f shape=%s",
-                symbol, yday, lv['VAL'], lv['VAH'], lv['POC'], lv['ATR'], lv['shape']
-            )
-            self._dbg_printed.add(symbol)
-
-        # BOTTLENECK 1: Is yesterday's profile shape allowed?
         if lv["shape"] not in self.allowed_shapes:
-            # self.logger.info("%s | REJECT: Previous day shape '%s' not in allowed shapes %s", symbol, lv["shape"], self.allowed_shapes)
             return
 
-        # BOTTLENECK 2: Is the symbol in a post-trade cooldown period?
         if symbol in self.last_trade_time and bar.name - self.last_trade_time[symbol] < self.cooldown_period:
-            # self.logger.info("%s | REJECT: In cooldown period.", symbol)
             return
 
+        # --- FIX: Re-insert the missing Dip Detection logic ---
         # ---- dip detection & confirmation
         below_val = bar["close"] < lv["VAL"] - self.min_dip_ticks * self.tick_size
         if below_val and symbol not in self.dip_started:
             self.dip_started[symbol] = bar.name
-            # DEBUG: first tick below VAL
             self.logger.info(
                 "%s | %s | below VAL %.2f at %.2f", symbol, bar.name.time(), lv['VAL'], bar['close']
             )
         elif not below_val and symbol in self.dip_started:
-            # DEBUG: dip aborted
             self.logger.info(
                 "%s | %s | back above VAL (dip aborted)", symbol, bar.name.time()
             )
@@ -306,6 +342,7 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     symbol in self.dip_started
                     and (bar.name - self.dip_started[symbol]).seconds >= self.confirm_minutes * 60
             )
+        # --- End of Fix ---
 
         # ==============================================================
         # ENTRY
@@ -314,29 +351,20 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 self.entry_start_time <= now <= self.entry_end_time
                 and below_val
                 and confirm_ok
+                and vwap_ok
+                and relative_volume_ok
                 and symbol not in self.ledger.open_positions
         ):
             stop_price = bar["close"] - self.atr_stop_mult * lv["ATR"]
 
-            # BOTTLENECK 3: Is the calculated stop price valid?
             if stop_price >= bar["close"]:
-                self.logger.info(
-                    "%s | %s | STOP_TOO_TIGHT close=%.2f stop=%.2f ATR=%.2f mult=%.2f",
-                    symbol, bar.name.time(), bar['close'], stop_price, lv['ATR'], self.atr_stop_mult
-                )
                 return
 
             risk = bar["close"] - stop_price
-            target_price = max(lv["POC"], bar["close"] + risk * 1.5)
-            rr = (target_price - bar["close"]) / risk
 
-            # BOTTLENECK 4: Is the Reward/Risk ratio sufficient?
-            if rr < self.min_rr:
-                self.logger.info(
-                    "%s | %s | RR_TOO_LOW rr=%.2f target=%.2f stop=%.2f",
-                    symbol, bar.name.time(), rr, target_price, stop_price
-                )
-                return
+            # --- FIX: Calculate target_price directly from min_rr ---
+            # This ensures your config setting is used correctly.
+            target_price = bar["close"] + (risk * self.min_rr)
 
             qty = self._position_size(bar["close"], stop_price)
             if qty == 0:
@@ -356,7 +384,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     f"{bar.name} | {symbol} | LONG {qty}@{bar['close']:.2f} "
                     f"TG:{target_price:.2f} SL:{stop_price:.2f}"
                 )
-
         # ==============================================================
         # EXIT management
         # ==============================================================

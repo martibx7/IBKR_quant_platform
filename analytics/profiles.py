@@ -74,7 +74,7 @@ class VolumeProfiler:
 
     @staticmethod
     def _classify_shape(vd: pd.Series, poc: float) -> str:
-        """Return 'D', 'P', 'b', 'B', or 'T' for yesterday’s profile."""
+        """Return 'D', 'P', 'L', 'B', or 'T' for yesterday’s profile."""
         total = vd.sum()
         if total == 0:
             return "T"
@@ -90,7 +90,7 @@ class VolumeProfiler:
         if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * vd.index.to_series().diff().median():
             return "B"
 
-        return "P" if upper > lower else "b"
+        return "P" if upper > lower else "L"
 
     def calculate(self, df: pd.DataFrame) -> dict | None:
         vd = self._calculate_distribution(df)
@@ -138,7 +138,7 @@ class MarketProfiler:
         peaks = counts.sort_values(ascending=False).head(3).index
         if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * counts.index.to_series().diff().median():
             return "B"
-        return "P" if upper > lower else "b"
+        return "P" if upper > lower else "L"
 
     def calculate(self, df: pd.DataFrame) -> dict | None:
         if df.empty or not isinstance(df.index, pd.DatetimeIndex):

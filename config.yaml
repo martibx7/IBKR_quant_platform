@@ -6,6 +6,7 @@ backtest:
   data_dir: 'data/historical'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
+  atr_period: 14
   slippage_model: 'percentage'   # 'percentage' | 'none'
   slippage_pct: 0.0005           # 0 .05 %
   # symbol_file: 'strategies/sp_500.txt'
@@ -77,15 +78,19 @@ strategy:
       tick_size: 0.01                 # still used for min_dip_ticks math
       lookback_days: 20
       value_area_pct: 0.70
-      confirmation_window_minutes: 0
+      confirmation_window_minutes: 5
       primary_target: 'poc'
-      min_dip_ticks: 0
-      min_reward_risk_ratio: 1.2
+      min_dip_ticks: 3
+      min_reward_risk_ratio: 3  # min R/R ratio to enter trade
+      use_vwap_filter: false
+      relative_volume_filter:
+        enable: false
+        ratio_threshold: 2.0  # Volume must be 2x the time-of-day average
 
       # --- NEW volatility / structure controls
-      atr_stop_mult: 0.7              # stop = entry − 0.5 × ATR
-      gap_skip_threshold: 2.0         # skip day if open gap ≥ 1 ATR
-      allowed_shapes: ['D', 'B', 'P', 'b']           # only trade after D-profile days
+      atr_stop_mult: 1.0              # stop = entry − 0.5 × ATR
+      gap_skip_threshold: 1         # skip day if open gap ≥ 1 ATR
+      allowed_shapes: ['D', 'B', 'P']           # options: ['D', 'B', 'P', 'L']
 
       # -------- risk / sizing
       risk_per_trade_pct: 0.01

@@ -418,7 +418,8 @@ class ValueAreaFadeStrategy(BaseStrategy):
             if qty == 0:
                 return
 
-            target_price = bar["close"] + (risk * self.min_rr)
+            ## changing this to be true mean reversion: target_price = bar["close"] + (risk * self.min_rr)
+            target_price = lv["POC"] if self.use_poc_target else lv["VAH"]
 
             if self.ledger.record_trade(
                     timestamp=bar.name,

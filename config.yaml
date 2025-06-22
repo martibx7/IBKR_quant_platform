@@ -78,7 +78,7 @@ strategy:
       lookback_days: 20
       value_area_pct: 0.70
       confirmation_window_minutes: 5
-      primary_target: 'poc'            # 'poc' | 'vah' (replaces use_poc_target)
+      primary_target: 'vah'            # 'poc' | 'vah' (replaces use_poc_target)
       min_dip_ticks: 0
       min_reward_risk_ratio: 1  # min R/R ratio to enter trade
       use_vwap_filter: false

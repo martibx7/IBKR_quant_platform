@@ -75,22 +75,31 @@ strategy:
         minutes: 30
 
       # -------- calculations & filters
-      tick_size: 0.01                 # still used for min_dip_ticks math
       lookback_days: 20
       value_area_pct: 0.70
       confirmation_window_minutes: 5
-      primary_target: 'poc'
-      min_dip_ticks: 3
-      min_reward_risk_ratio: 3  # min R/R ratio to enter trade
+      primary_target: 'poc'            # 'poc' | 'vah' (replaces use_poc_target)
+      min_dip_ticks: 0
+      min_reward_risk_ratio: 1  # min R/R ratio to enter trade
       use_vwap_filter: false
       relative_volume_filter:
         enable: false
         ratio_threshold: 2.0  # Volume must be 2x the time-of-day average
 
       # --- NEW volatility / structure controls
-      atr_stop_mult: 1.0              # stop = entry − 0.5 × ATR
-      gap_skip_threshold: 1         # skip day if open gap ≥ 1 ATR
-      allowed_shapes: ['D', 'B', 'P']           # options: ['D', 'B', 'P', 'L']
+      atr_stop_mult: 1.0              # stop = entry - 0.5 * ATR
+      gap_skip_threshold: 1         # skip day if open gap >= 1 ATR
+      allowed_shapes: ['D', 'B', 'P', 'L']           # options: ['D', 'B', 'P', 'L']
+
+      # --- Trigger & Gate (v4.1.0) ----
+      trigger_config:
+        mode: 'weighted_average'               # 'val_only' | 'vwap_only' | 'weighted_average'
+        vwap_sigma_level: 2.0
+        weight_val: 0.3                # only used when mode = weighted_average
+        weight_vwap: 0.7               # (must sum to 1.0 with weight_val)
+      vwap_stdev_gate:
+        enable: false                   # apply independent VWAP-stdev gate
+        sigma_level: 2.0
 
       # -------- risk / sizing
       risk_per_trade_pct: 0.01

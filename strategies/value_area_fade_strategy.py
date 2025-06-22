@@ -1,30 +1,28 @@
-# strategies/value_area_fade_strategy.py
-"""
-Intraday Value-Area Fade – v3.0.2
-
-Upgrades vs. v2.x
------------------
-* Vol-scaled stop & sizing  (ATR-based)
-* Profile-shape gate        (default only after D-profiles)
-* Gap-day auto-skip         (open gap ≥ N ATRs)
-"""
-
 from __future__ import annotations
+
+"""
+Intraday Value-Area Fade – v4.1.0
+
+Upgrades vs. v4.0.x
+-----------------
+* Separated VWAP Stdev logic into a flexible Trigger and an independent Gate.
+* Configuration is now more modular to allow combining different trigger/gate rules.
+"""
 
 from datetime import time, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
-import time as perf_timer # LOGGING: For performance timing
-import json # LOGGING: To format parameters
+import time as perf_timer
+import json
 
+import numpy as np
 import pandas as pd
 
 from strategies.base import BaseStrategy
 from analytics.profiles import VolumeProfiler, MarketProfiler, get_session_times
 from analytics.indicators import calculate_atr
-# --- NEW: Import the relative volume function ---
 from analytics.relative_volume import has_high_relative_volume
-
+from analytics.vwap import VWAPCalculator
 
 class ValueAreaFadeStrategy(BaseStrategy):
     """Long-only value-area fade with volatility-aware risk controls."""
@@ -84,11 +82,16 @@ class ValueAreaFadeStrategy(BaseStrategy):
 
         self.min_dip_ticks   = params.get("min_dip_ticks", 3)
         self.min_rr          = params.get("min_reward_risk_ratio", 1.0)
+        primary = str(params.get("primary_target", "poc")).lower()
+        if primary not in {"poc", "vah"}:
+            raise ValueError(f"Invalid primary_target: {primary}")
+        self.use_poc_target = (primary == "poc")
+        self.use_vah_target = (primary == "vah")
 
-        # --- NEW: VWAP filter parameter ---
+        # --- Simple VWAP Filter (kept for backward compatibility) ---
         self.use_vwap_filter = params.get("use_vwap_filter", False)
 
-        # --- NEW: Relative Volume filter parameters ---
+        # --- Relative Volume filter parameters ---
         rel_vol_params = params.get("relative_volume_filter", {})
         self.use_rel_vol_filter = rel_vol_params.get("enable", False)
         self.rel_vol_ratio      = rel_vol_params.get("ratio_threshold", 2.0)
@@ -96,6 +99,24 @@ class ValueAreaFadeStrategy(BaseStrategy):
         # -------- risk / sizing -------------------------------------- #
         self.risk_pct          = params.get("risk_per_trade_pct", 0.01)
         self.liquidity_cap_pct = params.get("liquidity_cap_pct", 0.05)
+
+        # <-- MODIFIED: Separated Trigger and Gate configurations -->
+        # --- Flexible Entry Trigger ---
+        trigger_params = params.get("trigger_config", {})
+        self.trigger_mode = trigger_params.get("mode", "val_only")
+        self.trigger_vwap_sigma = float(trigger_params.get("vwap_sigma_level", 2.0))
+        self.weight_val = float(trigger_params.get("weight_val", 0.5))
+        self.weight_vwap = float(trigger_params.get("weight_vwap", 0.5))
+        if self.trigger_mode not in ["val_only", "vwap_only", "weighted_average"]:
+            raise ValueError(f"Invalid trigger mode: {self.trigger_mode}")
+        if self.trigger_mode == "weighted_average" and not np.isclose(self.weight_val + self.weight_vwap, 1.0):
+            raise ValueError("Weights for VAL and VWAP must sum to 1.0")
+
+        # --- Independent VWAP Standard Deviation Gate ---
+        gate_params = params.get("vwap_stdev_gate", {})
+        self.use_vwap_stdev_gate = gate_params.get("enable", False)
+        self.vwap_gate_sigma = float(gate_params.get("sigma_level", 2.0))
+        # <-- END MODIFIED -->
 
         # -------- tick size ------------------------------------------ #
         self.tick_size = float(
@@ -126,15 +147,15 @@ class ValueAreaFadeStrategy(BaseStrategy):
         self.dip_started: Dict[str, pd.Timestamp] = {}
         self.skip_day: Dict[str, pd.Timestamp] = {}
         self.active_trades: Dict[str, Dict] = {}
-        self.intraday_vwap_data: Dict[str, Dict] = {}
         self.hist_cum_vol: Dict[str, Dict[pd.Timestamp, pd.Series]] = {}
         self.todays_bars: Dict[str, pd.DataFrame] = {}
+        self.vwap_calculators: Dict[str, VWAPCalculator] = {}
 
-        # LOGGING: Log all parameters at startup for easy run analysis
         self.log_parameters()
 
     def log_parameters(self):
         """Helper to log all strategy parameters."""
+        # <-- MODIFIED: Updated logging for new config structure -->
         params_to_log = {
             "Symbols": f"{len(self.symbols)} loaded" + (f" from {self.symbol_whitelist}" if self.symbol_whitelist else ""),
             "Time Window": f"{self.entry_start_time.isoformat()} - {self.entry_end_time.isoformat()}",
@@ -152,28 +173,32 @@ class ValueAreaFadeStrategy(BaseStrategy):
             "Liquidity Cap %": self.liquidity_cap_pct,
             "Tick Size": self.tick_size,
             "Profile Engine": self.profile_type,
-            "Use VWAP Filter": self.use_vwap_filter,
+            "Use VWAP Filter (Simple)": self.use_vwap_filter,
             "Use Relative Volume Filter": self.use_rel_vol_filter,
-            "Relative Volume Ratio": self.rel_vol_ratio
+            "Relative Volume Ratio": self.rel_vol_ratio,
+            "Trigger Config": {
+                "Mode": self.trigger_mode,
+                "VWAP Sigma": self.trigger_vwap_sigma,
+                "Weight VAL": self.weight_val,
+                "Weight VWAP": self.weight_vwap
+            },
+            "VWAP Stdev Gate": {
+                "Enable": self.use_vwap_stdev_gate,
+                "Sigma Level": self.vwap_gate_sigma
+            }
         }
-        # Pretty print the parameters to the log
+        # <-- END MODIFIED -->
         log_message = "Strategy Initialized with Parameters:\n"
         log_message += json.dumps(params_to_log, indent=2)
         self.logger.info(log_message)
 
 
-    # ------------------------------------------------------------------ #
     def get_required_lookback(self) -> int:
-        """Yesterday + N-day lookback."""
         return self.lookback_days + 1
 
-    # ------------------------------------------------------------------ #
-    # Session-prep                                                       #
-    # ------------------------------------------------------------------ #
     def on_market_open(self, historical_data: Dict[str, pd.DataFrame]):
-        # --- NEW: Reset daily data containers ---
-        self.intraday_vwap_data = {}
         self.todays_bars = {}
+        self.vwap_calculators = {}
 
         self.logger.info(
             "Starting pre-market value area calculation using %s…",
@@ -192,10 +217,8 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 self.logger.warning("%s | Historical data is empty, skipping.", sym)
                 continue
 
-            # --- Get RTH session times ---
             session_start, session_end = get_session_times('regular')
 
-            # --- NEW: Pre-calculate historical cumulative volume profiles ---
             if self.use_rel_vol_filter:
                 self.hist_cum_vol[sym] = {}
                 for d, day_df in df.groupby(df.index.date):
@@ -203,7 +226,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     if not rth_day_df.empty:
                         self.hist_cum_vol[sym][d] = rth_day_df['volume'].cumsum()
 
-            # --- Session-Aware ATR Calculation ---
             atr_session_df = df.between_time(session_start, session_end)
             daily = atr_session_df.resample("1D").agg(
                 {"high": "max", "low": "min", "close": "last"}
@@ -211,7 +233,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
             atr_series = calculate_atr(daily, period=self.atr_period)
             atr_by_date = pd.Series(atr_series.values, index=atr_series.index.date)
 
-            # --- Session-Aware Profile Calculation ---
             for d, day_df in df.groupby(df.index.date):
                 rth_day_df = day_df.between_time(session_start, session_end)
                 rth_day_df = rth_day_df.copy()
@@ -261,9 +282,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
             t_end - t_start,
             )
 
-    # ------------------------------------------------------------------ #
-    # Helpers                                                            #
-    # ------------------------------------------------------------------ #
     def _position_size(self, entry: float, stop: float) -> int:
         risk_per_share = max(entry - stop, self.tick_size)
         eq = self.ledger.get_total_equity(self.current_prices)
@@ -271,9 +289,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
         by_liq  = int((eq * self.liquidity_cap_pct) / entry)
         return max(1, min(by_risk, by_liq))
 
-    # ------------------------------------------------------------------ #
-    # Intraday logic                                                     #
-    # ------------------------------------------------------------------ #
     def on_bar(self, symbol: str, bar: pd.Series):
         if self.symbol_whitelist and symbol not in self.symbol_whitelist:
             return
@@ -282,24 +297,27 @@ class ValueAreaFadeStrategy(BaseStrategy):
         today = bar.name.date()
         now   = bar.name.time()
 
-        # --- Efficiently build up the current day's bars for checks ---
         if symbol not in self.todays_bars or self.todays_bars[symbol].iloc[-1].name.date() != today:
             self.todays_bars[symbol] = pd.DataFrame([bar])
         else:
             self.todays_bars[symbol] = pd.concat([self.todays_bars[symbol], pd.DataFrame([bar])])
 
-        # --- Efficient Intraday VWAP Calculation ---
-        if symbol not in self.intraday_vwap_data or self.intraday_vwap_data[symbol]['date'] != today:
-            self.intraday_vwap_data[symbol] = {'tp_vol': 0, 'vol': 0, 'date': today}
+        # --- VWAP Calculation ---
+        if symbol not in self.vwap_calculators:
+            self.vwap_calculators[symbol] = VWAPCalculator()
+        calculator = self.vwap_calculators[symbol]
+        calculator.update(bar)
+        # We need to request bands for both the trigger and the gate sigma levels
+        sigmas_to_calc = {self.trigger_vwap_sigma, self.vwap_gate_sigma}
+        vwap_data = calculator.get_vwap_bands(sigmas=list(sigmas_to_calc))
+        current_vwap = vwap_data.get('vwap')
+        bands = vwap_data.get('bands', {})
 
-        typical_price = (bar['high'] + bar['low'] + bar['close']) / 3
-        self.intraday_vwap_data[symbol]['tp_vol'] += typical_price * bar['volume']
-        self.intraday_vwap_data[symbol]['vol'] += bar['volume']
+        # --- Gating Conditions ---
+        vwap_simple_gate_ok = True
+        if self.use_vwap_filter and current_vwap:
+            vwap_simple_gate_ok = bar['close'] > current_vwap
 
-        current_vwap = self.intraday_vwap_data[symbol]['tp_vol'] / self.intraday_vwap_data[symbol]['vol'] if self.intraday_vwap_data[symbol]['vol'] > 0 else 0
-        vwap_ok = (not self.use_vwap_filter) or (bar['close'] > current_vwap)
-
-        # --- Relative Volume Check ---
         relative_volume_ok = True
         if self.use_rel_vol_filter:
             hist_profiles = self.hist_cum_vol.get(symbol, {})
@@ -309,6 +327,15 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 bar_ts=bar.name,
                 ratio_threshold=self.rel_vol_ratio
             )
+
+        # --- Independent VWAP Standard Deviation Gate ---
+        vwap_stdev_gate_ok = True
+        if self.use_vwap_stdev_gate:
+            lower_gate_band = bands.get(f'lower_{self.vwap_gate_sigma}s')
+            if lower_gate_band is not None:
+                vwap_stdev_gate_ok = bar['close'] < lower_gate_band
+            else:
+                vwap_stdev_gate_ok = False
 
         # --- Yesterday's Levels & Filters ---
         yday = today - timedelta(days=1)
@@ -322,17 +349,35 @@ class ValueAreaFadeStrategy(BaseStrategy):
         if symbol in self.last_trade_time and bar.name - self.last_trade_time[symbol] < self.cooldown_period:
             return
 
-        # --- FIX: Re-insert the missing Dip Detection logic ---
-        # ---- dip detection & confirmation
-        below_val = bar["close"] < lv["VAL"] - self.min_dip_ticks * self.tick_size
-        if below_val and symbol not in self.dip_started:
+        # --- Calculate Flexible Entry Trigger ---
+        entry_trigger_price = None
+        lower_vwap_trigger_band = bands.get(f'lower_{self.trigger_vwap_sigma}s')
+
+        if self.trigger_mode == 'val_only':
+            entry_trigger_price = lv["VAL"]
+        elif self.trigger_mode == 'vwap_only':
+            if lower_vwap_trigger_band is not None:
+                entry_trigger_price = lower_vwap_trigger_band
+        elif self.trigger_mode == 'weighted_average':
+            if lower_vwap_trigger_band is not None:
+                entry_trigger_price = (lv["VAL"] * self.weight_val) + (lower_vwap_trigger_band * self.weight_vwap)
+            else:
+                entry_trigger_price = lv["VAL"]
+
+        if entry_trigger_price is None:
+            return
+
+        # --- Dip Detection (based on flexible trigger) ---
+        is_below_trigger = bar["close"] < entry_trigger_price - self.min_dip_ticks * self.tick_size
+
+        if is_below_trigger and symbol not in self.dip_started:
             self.dip_started[symbol] = bar.name
             self.logger.info(
-                "%s | %s | below VAL %.2f at %.2f", symbol, bar.name.time(), lv['VAL'], bar['close']
+                "%s | %s | below entry trigger %.2f at %.2f", symbol, bar.name.time(), entry_trigger_price, bar['close']
             )
-        elif not below_val and symbol in self.dip_started:
+        elif not is_below_trigger and symbol in self.dip_started:
             self.logger.info(
-                "%s | %s | back above VAL (dip aborted)", symbol, bar.name.time()
+                "%s | %s | back above trigger (dip aborted)", symbol, bar.name.time()
             )
             self.dip_started.pop(symbol, None)
 
@@ -342,16 +387,16 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     symbol in self.dip_started
                     and (bar.name - self.dip_started[symbol]).seconds >= self.confirm_minutes * 60
             )
-        # --- End of Fix ---
 
         # ==============================================================
         # ENTRY
         # ==============================================================
         if (
                 self.entry_start_time <= now <= self.entry_end_time
-                and below_val
+                and is_below_trigger
                 and confirm_ok
-                and vwap_ok
+                and vwap_simple_gate_ok
+                and vwap_stdev_gate_ok
                 and relative_volume_ok
                 and symbol not in self.ledger.open_positions
         ):
@@ -361,14 +406,19 @@ class ValueAreaFadeStrategy(BaseStrategy):
                 return
 
             risk = bar["close"] - stop_price
+            level = lv["POC"] if self.use_poc_target else lv["VAH"]
+            potential_reward = level - bar["close"]
+            rr = potential_reward / risk if risk > 0 else 0
 
-            # --- FIX: Calculate target_price directly from min_rr ---
-            # This ensures your config setting is used correctly.
-            target_price = bar["close"] + (risk * self.min_rr)
+            if rr < self.min_rr:
+                self.logger.debug(f"{symbol} skipped: R:R={rr:.2f} below min {self.min_rr}")
+                return
 
             qty = self._position_size(bar["close"], stop_price)
             if qty == 0:
                 return
+
+            target_price = bar["close"] + (risk * self.min_rr)
 
             if self.ledger.record_trade(
                     timestamp=bar.name,
@@ -413,7 +463,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
                     f"{bar.name} | {symbol} | EXIT {qty}@{bar['close']:.2f} ({reason})"
                 )
 
-    # ------------------------------------------------------------------
     def on_session_end(self):
         """No end-of-day actions yet."""
         pass

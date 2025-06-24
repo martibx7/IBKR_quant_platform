@@ -37,17 +37,20 @@ def process_and_write_chunk(df_list: list, engine):
     if not df_list:
         return
 
+    # Combine all dataframes in the chunk
     master_chunk_df = pd.concat(df_list, ignore_index=True)
 
-    # Clean up duplicates within the chunk
-    master_chunk_df.set_index('timestamp', inplace=True)
-    master_chunk_df = master_chunk_df[~master_chunk_df.index.duplicated(keep='first')]
-    master_chunk_df.reset_index(inplace=True)
-    master_chunk_df = master_chunk_df[['timestamp', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']]
+    # Drop true duplicates based on both timestamp and symbol
+    master_chunk_df = master_chunk_df.drop_duplicates(
+        subset=['timestamp', 'symbol'], keep='first'
+    )
 
-    # --- FIX APPLIED HERE ---
-    # Use a large chunksize for PostgreSQL for high performance, and a smaller,
-    # safe chunksize for SQLite to stay under its parameter limit.
+    # Ensure the desired column order
+    master_chunk_df = master_chunk_df[
+        ['timestamp', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']
+    ]
+
+    # Use larger chunk sizes for PostgreSQL, smaller for SQLite
     db_chunk_size = 5000 if engine.dialect.name == 'postgresql' else 120
 
     master_chunk_df.to_sql(
@@ -101,26 +104,34 @@ def main():
             chunk_dfs.append(df)
 
             if len(chunk_dfs) >= CHUNK_SIZE:
+                print(f"Writing chunk of {len(chunk_dfs)} files to database...")
                 process_and_write_chunk(chunk_dfs, engine)
+                print("Chunk write complete.")
                 chunk_dfs.clear()
 
         except Exception as e:
             print(f"\nError processing {filename}: {e}")
 
+    # Write any remaining frames
     if chunk_dfs:
+        print(f"Writing final chunk of {len(chunk_dfs)} files to database...")
         process_and_write_chunk(chunk_dfs, engine)
+        print("Final chunk write complete.")
 
     print("\nCreating optimized index for faster queries...")
     with engine.connect() as connection:
-        connection.execute(text("CREATE INDEX IF NOT EXISTS idx_date_symbol ON price_data (date, symbol);"))
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_date_symbol ON price_data (date, symbol);"
+        ))
         connection.commit()
+    print("Index creation complete.")
 
-    # --- FIX APPLIED HERE ---
-    # For PostgreSQL, VACUUM must run outside a transaction block (in autocommit mode).
+    # For PostgreSQL, VACUUM must run outside a transaction block
     if engine.dialect.name == 'postgresql':
-        print("Optimizing table statistics for PostgreSQL...")
+        print("Optimizing table statistics for PostgreSQL (VACUUM ANALYZE)...")
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             connection.execute(text("VACUUM ANALYZE price_data;"))
+        print("VACUUM ANALYZE complete.")
 
     print("\n--- Database population complete! ---")
 

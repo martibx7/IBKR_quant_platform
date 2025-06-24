@@ -62,8 +62,8 @@ strategy:
       profile_type: 'volume'          # 'volume' | 'market'
 
       # -------- watch-list
-      use_symbol_file: true
-      symbol_file: 'strategies/sp_500.txt'   # one ticker per line
+      use_symbol_file: false
+      symbol_file: 'strategies/10.txt'   # one ticker per line
 
       # -------- session timing
       session_open_time: '09:30:00'   # used for gap-size check
@@ -75,10 +75,12 @@ strategy:
         minutes: 30
 
       # -------- calculations & filters
-      lookback_days: 20
+      lookback_days: 15
+      poc_lookback_days: 10
+      poc_dispersion_threshold: 0.0145  # min std-dev of POC over lookback period
       value_area_pct: 0.70
-      confirmation_window_minutes: 5
-      primary_target: 'vah'            # 'poc' | 'vah' (replaces use_poc_target)
+      confirmation_window_minutes: 0
+      primary_target: 'poc'            # 'poc' | 'vah' (replaces use_poc_target)
       min_dip_ticks: 0
       min_reward_risk_ratio: 1  # min R/R ratio to enter trade
       use_vwap_filter: false
@@ -87,13 +89,14 @@ strategy:
         ratio_threshold: 2.0  # Volume must be 2x the time-of-day average
 
       # --- NEW volatility / structure controls
+      min_atr_pct: 0.02
       atr_stop_mult: 1.0              # stop = entry - 0.5 * ATR
       gap_skip_threshold: 1         # skip day if open gap >= 1 ATR
-      allowed_shapes: ['D', 'B', 'P', 'L']           # options: ['D', 'B', 'P', 'L']
+      allowed_shapes: ['D', 'B', 'P', 'L']           # options: ['D', 'B', 'P', 'L', 'T']
 
       # --- Trigger & Gate (v4.1.0) ----
       trigger_config:
-        mode: 'weighted_average'               # 'val_only' | 'vwap_only' | 'weighted_average'
+        mode: 'val_only'               # 'val_only' | 'vwap_only' | 'weighted_average'
         vwap_sigma_level: 2.0
         weight_val: 0.3                # only used when mode = weighted_average
         weight_vwap: 0.7               # (must sum to 1.0 with weight_val)

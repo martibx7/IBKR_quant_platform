@@ -72,9 +72,16 @@ class ValueAreaFadeStrategy(BaseStrategy):
         )
 
         # -------- params / filters ----------------------------------- #
-        self.lookback_days   = params.get("lookback_days", 10)
+        self.lookback_days   = params.get("lookback_days", 30)
+        self.poc_lookback_days = params.get("poc_lookback_days", 10)
         self.value_area_pct  = params.get("value_area_pct", 0.70)
         self.confirm_minutes = params.get("confirmation_window_minutes", 0)
+
+        # --- NEW: Profile and Stability Filter Parameters ---
+        self.profile_type = params.get("profile_type", "volume").lower()
+        self.poc_dispersion_threshold = params.get("poc_dispersion_threshold", 0.015) # e.g., 1.5% dispersion max
+        self.min_atr_pct = params.get("min_atr_pct", 0.02) # e.g., Require ATR to be at least 2% of the stock price
+
 
         self.atr_stop_mult   = params.get("atr_stop_mult", 0.5)
         self.gap_skip_thresh = params.get("gap_skip_threshold", 1.0)
@@ -150,6 +157,7 @@ class ValueAreaFadeStrategy(BaseStrategy):
         self.hist_cum_vol: Dict[str, Dict[pd.Timestamp, pd.Series]] = {}
         self.todays_bars: Dict[str, pd.DataFrame] = {}
         self.vwap_calculators: Dict[str, VWAPCalculator] = {}
+        self.daily_poc_cache: Dict[str, list] = {}
 
         self.log_parameters()
 
@@ -164,6 +172,10 @@ class ValueAreaFadeStrategy(BaseStrategy):
             "Lookback Days": self.lookback_days,
             "Value Area %": self.value_area_pct,
             "Confirmation Minutes": self.confirm_minutes,
+            "Profile Type": self.profile_type,
+            "POC Lookback Days": self.poc_lookback_days,
+            "POC Dispersion Threshold": self.poc_dispersion_threshold,
+            "Min ATR %": self.min_atr_pct,
             "ATR Stop Multiplier": self.atr_stop_mult,
             "Gap Skip Threshold (ATRs)": self.gap_skip_thresh,
             "Allowed Shapes": list(self.allowed_shapes),
@@ -194,93 +206,102 @@ class ValueAreaFadeStrategy(BaseStrategy):
 
 
     def get_required_lookback(self) -> int:
-        return self.lookback_days + 1
+        return max(self.lookback_days, self.poc_lookback_days, self.atr_period) + 1
 
     def on_market_open(self, historical_data: Dict[str, pd.DataFrame]):
         self.todays_bars = {}
         self.vwap_calculators = {}
 
+        # A list to hold symbols that pass all our filters for the day
+        valid_candidates = []
+
         self.logger.info(
-            "Starting pre-market value area calculation using %s…",
+            "Starting pre-market screening with POC Cluster filter using %s...",
             self._profiler.__class__.__name__,
         )
-        t_start = perf_timer.perf_counter()
 
-        symbols_processed = 0
         for sym, df in historical_data.items():
-            if sym not in self.symbols:
+            if df.empty or len(df.index.normalize().unique()) < self.poc_lookback_days:
                 continue
 
-            t_sym_start = perf_timer.perf_counter()
+            today = df.index.normalize().max()
 
-            if df.empty:
-                self.logger.warning("%s | Historical data is empty, skipping.", sym)
-                continue
+            # --- EFFICIENT POC CLUSTER CHECK ---
+            if sym not in self.daily_poc_cache:
+                self.daily_poc_cache[sym] = []
+                # Initial cache fill on the first run for this symbol
+                lookback_start_date = today - pd.Timedelta(days=self.poc_lookback_days)
+                lookback_df = df[(df.index >= lookback_start_date) & (df.index < today)]
 
-            session_start, session_end = get_session_times('regular')
-
-            if self.use_rel_vol_filter:
-                self.hist_cum_vol[sym] = {}
-                for d, day_df in df.groupby(df.index.date):
-                    rth_day_df = day_df.between_time(session_start, session_end)
-                    if not rth_day_df.empty:
-                        self.hist_cum_vol[sym][d] = rth_day_df['volume'].cumsum()
-
-            atr_session_df = df.between_time(session_start, session_end)
-            daily = atr_session_df.resample("1D").agg(
-                {"high": "max", "low": "min", "close": "last"}
-            ).dropna()
-            atr_series = calculate_atr(daily, period=self.atr_period)
-            atr_by_date = pd.Series(atr_series.values, index=atr_series.index.date)
-
-            for d, day_df in df.groupby(df.index.date):
-                rth_day_df = day_df.between_time(session_start, session_end)
-                rth_day_df = rth_day_df.copy()
-                rth_day_df["close"]  = pd.to_numeric(rth_day_df["close"],  errors="coerce")
-                rth_day_df["volume"] = pd.to_numeric(rth_day_df["volume"], errors="coerce")
-                rth_day_df = rth_day_df.dropna(subset=["close", "volume"])
-
-                if rth_day_df.empty:
+                # Get the most recent N unique days
+                unique_days_in_lookback = sorted(lookback_df.index.normalize().unique())
+                if len(unique_days_in_lookback) < self.poc_lookback_days:
                     continue
 
-                stats = self._profiler.calculate(rth_day_df)
+                actual_lookback_days = unique_days_in_lookback[-self.poc_lookback_days:]
 
-                if not stats:
-                    sess_range = rth_day_df['high'].max() - rth_day_df['low'].min()
-                    if sess_range > 0:
-                        mid = (rth_day_df['high'].max() + rth_day_df['low'].min()) / 2
-                        stats = {'poc_price': mid, 'value_area_high': mid + sess_range * 0.25, 'value_area_low':  mid - sess_range * 0.25, 'shape': 'T'}
-                    else:
-                        continue
+                for date in actual_lookback_days:
+                    day_df = lookback_df[lookback_df.index.date == date.date()]
+                    if day_df.empty: continue
+                    stats = self._profiler.calculate(day_df)
+                    if stats and 'poc_price' in stats:
+                        self.daily_poc_cache[sym].append(stats['poc_price'])
+            else:
+                yday_df = df[df.index.date == (today.date() - pd.Timedelta(days=1))]
+                if not yday_df.empty:
+                    stats = self._profiler.calculate(yday_df)
+                    if stats and 'poc_price' in stats:
+                        self.daily_poc_cache[sym].append(stats['poc_price'])
+                        while len(self.daily_poc_cache[sym]) > self.poc_lookback_days:
+                            self.daily_poc_cache[sym].pop(0)
 
-                self.value_areas[sym][d] = {
-                    "VAH":   stats["value_area_high"],
-                    "VAL":   stats["value_area_low"],
-                    "POC":   stats["poc_price"],
-                    "VWAP":  (rth_day_df["close"] * rth_day_df["volume"]).sum() / max(rth_day_df["volume"].sum(), 1),
-                    "shape": stats.get("shape", "D").upper(),
-                    "ATR":   float(atr_by_date.get(d, float("nan"))),
-                    "y_close": rth_day_df["close"].iloc[-1],
+            # Now, perform the dispersion check on the cached POCs
+            cached_pocs = self.daily_poc_cache[sym]
+            if len(cached_pocs) < self.poc_lookback_days * 0.8:
+                continue
+
+            poc_mean = np.mean(cached_pocs)
+            poc_std_dev = np.std(cached_pocs)
+            if poc_mean == 0: continue
+
+            poc_dispersion = poc_std_dev / poc_mean
+            if poc_dispersion > self.poc_dispersion_threshold:
+                continue # Skip if dispersion is too high
+
+            # --- MINIMUM ATR CHECK ---
+            daily_agg = df.resample("1D").agg({"high": "max", "low": "min", "close": "last"}).dropna()
+            if len(daily_agg) < 2: continue
+
+            atr_series = calculate_atr(daily_agg, period=self.atr_period)
+            yday_atr = atr_series.iloc[-2]
+            yday_close = daily_agg['close'].iloc[-2]
+
+            if yday_close > 0 and (yday_atr / yday_close) < self.min_atr_pct:
+                continue # Skip if volatility is too low
+
+            # If all checks pass, this is a valid candidate for today
+            valid_candidates.append(sym)
+
+        # --- FINAL LEVEL CALCULATION (only for valid candidates) ---
+        self.logger.info(f"Found {len(valid_candidates)} valid candidates after screening.")
+        for sym in valid_candidates:
+            df = historical_data[sym]
+            today = df.index.normalize().max()
+            yday_df = df[df.index.date == (today.date() - pd.Timedelta(days=1))]
+            yday_stats = self._profiler.calculate(yday_df)
+
+            daily_agg = df.resample("1D").agg({"high": "max", "low": "min", "close": "last"}).dropna()
+            atr_series = calculate_atr(daily_agg, period=self.atr_period)
+            yday_atr = atr_series.iloc[-1]
+
+            if yday_stats:
+                self.value_areas[sym] = {
+                    "VAH": yday_stats["value_area_high"],
+                    "VAL": yday_stats["value_area_low"],
+                    "POC": yday_stats["poc_price"],
+                    "shape": yday_stats.get("shape", "D").upper(),
+                    "ATR": yday_atr,
                 }
-
-                if d == (df.index.date[-1] - timedelta(days=1)):
-                    self.logger.debug(
-                        "%s | stored levels for %s  shape=%s ATR=%.2f",
-                        sym, d, self.value_areas[sym][d]['shape'], self.value_areas[sym][d]['ATR']
-                    )
-
-            t_sym_end = perf_timer.perf_counter()
-            self.logger.info(
-                "%s | Profile calculations complete in %.4f seconds", sym, t_sym_end - t_sym_start
-            )
-            symbols_processed += 1
-
-        t_end = perf_timer.perf_counter()
-        self.logger.info(
-            "Pre-market calculations for %d symbols finished in %.2f seconds.",
-            symbols_processed,
-            t_end - t_start,
-            )
 
     def _position_size(self, entry: float, stop: float) -> int:
         risk_per_share = max(entry - stop, self.tick_size)

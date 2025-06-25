@@ -10,11 +10,12 @@ from core.ledger import BacktestLedger
 class BaseStrategy(ABC):
     """Abstract base class for all trading strategies."""
 
-    def __init__(self, symbols: list[str], ledger: BacktestLedger, config: dict, **params):
+    def __init__(self, symbols: list[str], ledger: BacktestLedger, config: dict, timezone=None, **params):
         self.symbols = symbols
         self.ledger = ledger
         self.config = config
         self.params = params
+        self.tz = timezone
         self.active_trades = {}
         self.current_prices = {s: 0 for s in symbols}
         self.logger = self._setup_logger()

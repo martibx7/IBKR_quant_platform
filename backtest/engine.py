@@ -87,7 +87,7 @@ class BacktestEngine:
     def _load_all_data_from_feather(self) -> dict[str, pd.DataFrame]:
         engine_logger.info(f"Pre-loading data for {len(self.symbols)} strategy-specific symbols...")
         data_store = {}
-        # This now iterates over the CORRECT, smaller list of symbols.
+        # This now iterates over the CORRECT, larger list of symbols (if SPY was added).
         for symbol in tqdm(self.symbols, desc="Loading Feather Files"):
             file_path = os.path.join(self.feather_dir, f"{symbol}.feather")
             if os.path.exists(file_path):
@@ -118,7 +118,7 @@ class BacktestEngine:
     def _initialize_strategy(self, available_symbols: list) -> tuple:
         """
         MODIFIED: Initializes the strategy and returns the instance and the final list
-        of symbols the strategy will operate on.
+        of symbols the strategy will operate on, ensuring SPY is included.
         """
         strategy_module_name = camel_to_snake(self.strategy_name)
         strategy_module_path = f'strategies.{strategy_module_name}'
@@ -149,12 +149,24 @@ class BacktestEngine:
             final_symbols = available_symbols
             engine_logger.info(f"Strategy will use all {len(final_symbols)} available symbols.")
 
+        # --- THIS IS THE FIX ---
+        # Ensure SPY is always included for benchmark calculations.
+        # We use a set for an efficient check.
+        if 'SPY' not in set(final_symbols):
+            engine_logger.info("Adding 'SPY' to symbol list for benchmark calculations.")
+            final_symbols.append('SPY')
+
+        # Pass the original symbol list (without SPY unless specified) to the strategy
+        strategy_symbols = [s for s in final_symbols if s != 'SPY'] if 'SPY' not in (set(available_symbols) if use_file else set()) else final_symbols
+
         strategy_instance = strategy_class(
-            symbols=final_symbols,
+            symbols=strategy_symbols, # Pass the original list to the strategy
             ledger=self.ledger,
             config=self.config,
+            timezone=self.tz,
             **active_strategy_params
         )
+        # The engine itself will use the list that includes SPY
         return strategy_instance, final_symbols
 
 
@@ -180,35 +192,28 @@ class BacktestEngine:
                     results[symbol] = filtered_df
         return results
 
-    # In backtest/engine.py
-
     def run(self):
         engine_logger.info(f"Starting backtest for period: {self.test_start_dt.date()} to {self.test_end_dt.date()}...")
         lookback_period = self.strategy.get_required_lookback()
 
-        # Loop over the user-defined TEST calendar
         for trade_date in tqdm(self.test_trading_calendar, desc="Running Backtest"):
             self.ledger.settle_funds(trade_date)
 
-            # Find the index of the current date in the FULL calendar
             try:
                 current_date_index = self.full_trading_calendar.index(trade_date)
             except ValueError:
                 engine_logger.warning(f"Trade date {trade_date} not found in full calendar. Skipping.")
                 continue
 
-            # Check if there's enough history for a lookback
             if current_date_index < lookback_period:
                 engine_logger.warning(f"Not enough historical data for {trade_date}. Need {lookback_period} days, have {current_date_index}. Skipping day.")
                 continue
 
-            # Get lookback data by slicing the FULL calendar
             lookback_start_index = current_date_index - lookback_period
             lookback_dates = self.full_trading_calendar[lookback_start_index:current_date_index]
             historical_data = self._fetch_data(lookback_dates)
             intraday_data = self._fetch_data([trade_date])
 
-            # Skip if we are missing either historical or current day's data for any symbol
             if not historical_data or not any(v is not None and not v.empty for v in intraday_data.values()):
                 engine_logger.warning(f"Missing historical or intraday data for {trade_date}. Skipping.")
                 continue
@@ -219,25 +224,20 @@ class BacktestEngine:
                 self.strategy.on_session_end()
                 continue
 
-            # Ensure there is at least one bar to get the last timestamp
             last_timestamp_today = None
-            if any(not df.empty for df in intraday_data.values()):
-                # Efficiently iterate through each symbol's DataFrame
-                for symbol, df in intraday_data.items():
-                    if df.empty:
-                        continue
+            # Create a combined DataFrame to iterate through bars chronologically
+            all_intraday_bars = pd.concat(intraday_data.values()).sort_index()
 
-                    for timestamp, bar in df.iterrows():
-                        self.strategy.on_bar(symbol, bar) # Pass symbol directly
+            for timestamp, bar in all_intraday_bars.iterrows():
+                symbol = bar['symbol']
+                # The engine provides all bars, but the strategy's on_bar will filter
+                # for symbols it is explicitly managing.
+                self.strategy.on_bar(symbol, bar)
+                last_timestamp_today = timestamp
 
-                    # Keep track of the last timestamp of the day
-                    if last_timestamp_today is None or df.index[-1] > last_timestamp_today:
-                        last_timestamp_today = df.index[-1]
-
-                self.strategy.on_session_end()
-                if last_timestamp_today:
-                    self.ledger._update_equity(last_timestamp_today, self.strategy.current_prices)
-
+            self.strategy.on_session_end()
+            if last_timestamp_today:
+                self.ledger._update_equity(last_timestamp_today, self.strategy.current_prices)
 
         if hasattr(self.strategy, 'generate_report'):
             self.strategy.generate_report()

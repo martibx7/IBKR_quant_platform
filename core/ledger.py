@@ -47,7 +47,10 @@ class BacktestLedger:
             pos['quantity'] * market_prices.get(symbol, pos['entry_price'])
             for symbol, pos in self.open_positions.items()
         )
-        return self.cash + open_positions_value
+
+        unsettled_cash = sum(amount for _, amount in self.pending_settlements)
+
+        return self.cash + open_positions_value + unsettled_cash
 
     def _update_equity(self, timestamp: pd.Timestamp, market_prices: dict):
         """Calculates and records the current portfolio equity."""

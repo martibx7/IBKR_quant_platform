@@ -370,22 +370,46 @@ class ValueAreaFadeStrategy(BaseStrategy):
         return max(num_shares, 0)
 
     def on_bar(self, symbol: str, bar: pd.Series):
-        # --- SILENCED: This fires on every single bar for every symbol. ---
-        # self.logger.debug(f"on_bar fired for {symbol} @ {bar.name}")
-
         # 1) whitelist filter
         if self.symbol_whitelist and symbol not in self.symbol_whitelist:
-            # self.logger.debug(f"{symbol} | {bar.name.time()} | not in whitelist")
             return
         super().on_bar(symbol, bar)
 
-        today = bar.name.date()
-        now   = bar.name.time()
+        # --- TIMEZONE FIX: Convert the incoming bar's timestamp to the strategy's timezone ---
+        now_eastern = bar.name.astimezone(self.tz)
+        today = now_eastern.date()
+        now_time = now_eastern.time()
+
+        # --- EXIT LOGIC MOVED AND CORRECTED ---
+        if symbol in self.ledger.open_positions:
+            pos = self.ledger.open_positions[symbol]
+            trade_details = self.active_trades.get(symbol)
+
+            if trade_details: # Ensure there is an active trade record
+                hit_sl = bar["close"] <= trade_details["stop"]
+                hit_tp = bar["close"] >= trade_details["target"]
+                # Use the timezone-aware `now_time` for the EOD check
+                eod = now_time >= self.exit_time
+
+                if hit_sl or hit_tp or eod:
+                    reason = "SL" if hit_sl else "TP" if hit_tp else "EOD"
+                    self.logger.info(f"{bar.name} | {symbol} | EXIT {pos['quantity']}@{bar['close']:.2f} ({reason})")
+                    self.ledger.record_trade(
+                        timestamp=bar.name,
+                        symbol=symbol,
+                        quantity=pos["quantity"],
+                        price=bar["close"],
+                        order_type="SELL",
+                        market_prices=self.current_prices,
+                        exit_reason=reason,
+                    )
+                    self.active_trades.pop(symbol, None)
+                    return # Stop processing this bar for this symbol after an exit
+
+        # --- ENTRY LOGIC ---
 
         # 2) entry‐window filter
-        if not (self.entry_start_time <= now <= self.entry_end_time):
-            # --- SILENCED: This fires for every bar outside the trading window. ---
-            # self.logger.debug(f"{symbol} | {now} | outside entry window ({self.entry_start_time}-{self.entry_end_time})")
+        if not (self.entry_start_time <= now_time <= self.entry_end_time):
             return
 
 
@@ -395,56 +419,43 @@ class ValueAreaFadeStrategy(BaseStrategy):
         vwap_data = calculator.get_vwap_bands(sigmas=[self.trigger_vwap_sigma, self.vwap_gate_sigma])
         current_vwap = vwap_data.get('vwap')
         if self.use_vwap_filter and current_vwap and bar['close'] <= current_vwap:
-            self.logger.debug(f"{symbol} | {now} | VWAP fail: close {bar['close']:.2f} <= {current_vwap:.2f}")
+            self.logger.debug(f"{symbol} | {now_time} | VWAP fail: close {bar['close']:.2f} <= {current_vwap:.2f}")
             return
 
         # 5) relative‐volume filter
         if self.use_rel_vol_filter:
-            # Get the VWAP calculator we've already been updating
             calculator = self.vwap_calculators.get(symbol)
             if not calculator:
-                # Should not happen if calculator is initialized correctly
                 return
-
-                # Get the current cumulative volume directly from the calculator
             current_cumulative_volume = calculator.get_cumulative_volume()
-
-            # Get the historical average profile
             hist_profile = self.hist_cum_vol.get(symbol, {})
-
             if not has_high_relative_volume(
-                    current_cumulative_volume=current_cumulative_volume, # Pass the direct value
+                    current_cumulative_volume=current_cumulative_volume,
                     hist_cum_vol_profiles=hist_profile,
-                    bar_time=bar.name.time() # Pass the bar's time
+                    bar_time=now_time
             ):
-                self.logger.debug(f"{symbol} | {now} | relative-volume fail")
+                self.logger.debug(f"{symbol} | {now_time} | relative-volume fail")
                 return
 
         # 6) VWAP‐stdev gate
         if self.use_vwap_stdev_gate:
             lower = vwap_data['bands'].get(f'lower_{self.vwap_gate_sigma}s')
             if lower is None or bar['close'] >= lower:
-                self.logger.debug(f"{symbol} | {now} | stdev gate fail: close {bar['close']:.2f} >= {lower}")
+                self.logger.debug(f"{symbol} | {now_time} | stdev gate fail: close {bar['close']:.2f} >= {lower}")
                 return
 
         # 7) yesterday's value‐area
-        yday = today - timedelta(days=1)
         lv = self.value_areas.get(symbol)
         if not lv or pd.isna(lv["ATR"]):
-            # This is an important check, but can be noisy. Change to a comment if still too verbose.
-            # self.logger.debug(f"{symbol} | {now} | no VA for {yday}")
             return
 
         # 8) shape filter
         if lv["shape"] not in self.allowed_shapes:
-            # self.logger.debug(f"{symbol} | {now} | shape '{lv['shape']}' not allowed")
             return
 
         # 9) cooldown
         last = self.last_trade_time.get(symbol)
         if last and (bar.name - last) < self.cooldown_period:
-            secs = (bar.name - last).seconds
-            # self.logger.debug(f"{symbol} | {now} | cooldown {secs}s < {self.cooldown_period.seconds}s")
             return
 
         # 10) trigger price
@@ -457,59 +468,45 @@ class ValueAreaFadeStrategy(BaseStrategy):
             trigger = (lv["VAL"] * self.weight_val + (lower_band or lv["VAL"]) * self.weight_vwap)
 
         if trigger is None:
-            self.logger.debug(f"{symbol} | {now} | no trigger price")
+            self.logger.debug(f"{symbol} | {now_time} | no trigger price")
             return
 
         # 11) dip detection
         is_below = bar["close"] < trigger - self.min_dip_ticks * self.tick_size
         if not is_below:
-            # This was already commented out, which is correct.
-            # self.logger.debug(f"{symbol} | {now} | no dip: close {bar['close']:.2f} ≥ trigger {trigger:.2f}")
             return
         if symbol not in self.dip_started:
             self.dip_started[symbol] = bar.name
-            self.logger.info(f"{symbol} | {now} | dip started @ {bar['close']:.2f}")
+            self.logger.info(f"{symbol} | {now_time} | dip started @ {bar['close']:.2f}")
 
         # 12) confirmation window
         if self.confirm_minutes > 0:
             elapsed = (bar.name - self.dip_started[symbol]).seconds
             if elapsed < self.confirm_minutes * 60:
-                # self.logger.debug(f"{symbol} | {now} | waiting confirm {elapsed}s")
                 return
 
-        # 13) already in a trade?
+        # 13) already in a trade? (This is now a final check)
         if symbol in self.ledger.open_positions:
-            # self.logger.debug(f"{symbol} | {now} | already in position")
             return
 
         # 14) size & stop logic
         stop_price = bar["close"] - self.atr_stop_mult * lv["ATR"]
         if stop_price >= bar["close"]:
-            self.logger.debug(f"{symbol} | {now} | bad stop {stop_price:.2f} >= close")
+            self.logger.debug(f"{symbol} | {now_time} | bad stop {stop_price:.2f} >= close")
             return
         qty = self._position_size(bar["close"], stop_price, bar["volume"])
         if qty <= 0:
-            # self.logger.debug(f"{symbol} | {now} | zero quantity")
             return
 
         # 15) place entry
         target_price = lv["POC"] if self.use_poc_target else lv["VAH"]
-
-        # Calculate the potential reward and risk from the entry price
         reward = target_price - bar["close"]
         risk = bar["close"] - stop_price
-
-        # Ensure risk is a positive number to avoid division by zero
         if risk <= 0:
-            self.logger.debug(f"{symbol} | {now} | Invalid risk calculation. Risk: {risk:.2f}")
+            self.logger.debug(f"{symbol} | {now_time} | Invalid risk calculation. Risk: {risk:.2f}")
             return
-
-        # Calculate the ratio
         reward_risk_ratio = reward / risk
-
-        # Apply the gate
         if reward_risk_ratio < self.min_rr:
-            # self.logger.debug(f"{symbol} | {now} | R/R fail: {reward_risk_ratio:.2f} < min {self.min_rr}")
             return
 
         self.logger.info(f"{bar.name} | {symbol} | ENTER {qty}@{bar['close']:.2f} TP:{target_price:.2f} SL:{stop_price:.2f}")
@@ -524,26 +521,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
         self.active_trades[symbol] = {"stop": stop_price, "target": target_price}
         self.last_trade_time[symbol] = bar.name
 
-        # 16) exit logic
-        if symbol in self.ledger.open_positions and symbol in self.active_trades:
-            pos   = self.ledger.open_positions[symbol]
-            trade = self.active_trades[symbol]
-            hit_sl = bar["close"] <= trade["stop"]
-            hit_tp = bar["close"] >= trade["target"]
-            eod    = now >= self.exit_time
-            if hit_sl or hit_tp or eod:
-                reason = "SL" if hit_sl else "TP" if hit_tp else "EOD"
-                self.logger.info(f"{bar.name} | {symbol} | EXIT {pos['quantity']}@{bar['close']:.2f} ({reason})")
-                self.ledger.record_trade(
-                    timestamp=bar.name,
-                    symbol=symbol,
-                    quantity=pos["quantity"],
-                    price=bar["close"],
-                    order_type="SELL",
-                    market_prices=self.current_prices,
-                    exit_reason=reason,
-                )
-                self.active_trades.pop(symbol, None)
 
     def on_session_end(self):
         """No end-of-day actions yet."""

@@ -8,16 +8,16 @@ from backtest.engine import BacktestEngine
 from backtest.results import BacktestResults
 import logging
 
-def get_trade_dates(start_date_str, end_date_str) -> list[datetime]:
-    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-    end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-    trade_dates = []
-    current_date = start_date
-    while current_date <= end_date:
-        if current_date.weekday() < 5: # Monday to Friday
-            trade_dates.append(current_date)
-        current_date += timedelta(days=1)
-    return trade_dates
+## def get_trade_dates(start_date_str, end_date_str) -> list[datetime]:
+##     start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+##     end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+##     trade_dates = []
+##     current_date = start_date
+##     while current_date <= end_date:
+##         if current_date.weekday() < 5: # Monday to Friday
+##             trade_dates.append(current_date)
+##         current_date += timedelta(days=1)
+##     return trade_dates
 
 def main():
     """

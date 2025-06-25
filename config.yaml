@@ -87,8 +87,8 @@ strategy:
 
       # --- Trigger & Gate (v4.1.0) ----
       trigger_config:
-        mode: 'val_only'               # 'val_only' | 'vwap_only' | 'weighted_average'
-        vwap_sigma_level: 2.0
+        mode: 'vwap_only'               # 'val_only' | 'vwap_only' | 'weighted_average'
+        vwap_sigma_level: 2.5
         weight_val: 0.3                # only used when mode = weighted_average
         weight_vwap: 0.7               # (must sum to 1.0 with weight_val)
       vwap_stdev_gate:
@@ -96,7 +96,7 @@ strategy:
         sigma_level: 2.0
 
       # -------- risk / sizing
-      risk_per_trade_pct: 0.01
+      risk_per_trade_pct: 0.05
       liquidity_cap_pct: 0.05
 
 

@@ -53,6 +53,9 @@ def main():
         print("\n--- Backtest Run Complete ---")
         results.print_summary()
 
+        summary_string = results.get_summary_string()
+        engine.log_summary_to_strategy(summary_string)
+
         log_dir = "logs"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)

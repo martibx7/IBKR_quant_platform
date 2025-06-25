@@ -352,22 +352,6 @@ class ValueAreaFadeStrategy(BaseStrategy):
             f"Screen summary: {len(self.symbols)} input -> {len(valid_candidates)} passed"
         )
 
-    def _position_size(self, entry_price: float, stop_price: float, volume: float) -> int:
-        """
-        Returns the share count that keeps per-trade risk ≤ risk_per_trade_pct
-        **and** caps size to a fixed % of the bar’s volume.
-        """
-        cash = self.ledger.get_cash()
-        risk_per_trade = cash * self.risk_per_trade_pct
-        risk_per_share = entry_price - stop_price
-        if risk_per_share <= 0:
-            return 0
-
-        # liquidity cap: don’t take more than X % of this bar’s printed volume
-        liq_cap_shares = int(volume * self.liquidity_cap_pct)
-
-        num_shares = min(int(risk_per_trade / risk_per_share), liq_cap_shares)
-        return max(num_shares, 0)
 
     def on_bar(self, symbol: str, bar: pd.Series):
         # 1) whitelist filter
@@ -485,26 +469,35 @@ class ValueAreaFadeStrategy(BaseStrategy):
             if elapsed < self.confirm_minutes * 60:
                 return
 
-        # 13) already in a trade? (This is now a final check)
+        # 13 Final check: are we already in a trade? If so, do nothing more.
         if symbol in self.ledger.open_positions:
             return
 
-        # 14) size & stop logic
+        # 14) Calculate stop price and position size
         stop_price = bar["close"] - self.atr_stop_mult * lv["ATR"]
         if stop_price >= bar["close"]:
             self.logger.debug(f"{symbol} | {now_time} | bad stop {stop_price:.2f} >= close")
             return
-        qty = self._position_size(bar["close"], stop_price, bar["volume"])
+
+        qty = self._calculate_position_size(
+            entry_price=bar["close"],
+            stop_price=stop_price,
+            risk_per_trade_pct=self.risk_per_trade_pct,
+            liquidity_cap_pct=self.liquidity_cap_pct,
+            bar_volume=bar["volume"]
+        )
         if qty <= 0:
             return
 
-        # 15) place entry
+        # 15) Final R/R check and trade execution
         target_price = lv["POC"] if self.use_poc_target else lv["VAH"]
-        reward = target_price - bar["close"]
         risk = bar["close"] - stop_price
+        reward = target_price - bar["close"]
+
         if risk <= 0:
             self.logger.debug(f"{symbol} | {now_time} | Invalid risk calculation. Risk: {risk:.2f}")
             return
+
         reward_risk_ratio = reward / risk
         if reward_risk_ratio < self.min_rr:
             return

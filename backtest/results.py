@@ -176,30 +176,40 @@ class BacktestResults:
         excess = ret - (rfr / periods)
         return (excess.mean() / excess.std()) * np.sqrt(periods)
 
-    def print_summary(self) -> None:
+    def get_summary_string(self) -> str:
+        """Returns the formatted backtest results as a multi-line string."""
         if not self.metrics:
-            return
+            return "No metrics to display."
 
         m = self.metrics
-        print("\n--- Backtest Results ---")
-        print(f"{'Initial Equity':<28} ${m['Initial Equity']:>15,.2f}")
-        print(f"{'Final Equity':<28} ${m['Final Equity']:>15,.2f}")
-        print(f"{'Total PnL':<28} ${m['Total PnL']:>15,.2f}")
-        print(f"{'Total Fees':<28} ${m['Total Fees']:>15,.2f}")
-        print(f"{'Net PnL':<28} ${m['Net PnL']:>15,.2f}")
-        print(f"{'Total Trades':<28} {m['Total Trades']:>15}")
-        print(f"{'Win Rate':<28} {m['Win Rate']:>14.2f}%")
-        print(f"{'Profit Factor':<28} {m['Profit Factor']:>15.2f}")
-        print(f"{'Avg Win':<28} ${m['Avg Win']:>15,.2f}")
-        print(f"{'Avg Loss':<28} ${m['Avg Loss']:>15,.2f}")
-        print(f"{'Reward/Risk Ratio':<28} {m['Reward/Risk Ratio']:>14.2f}:1")
         dd_str = f"${m['Max Drawdown ($)']:,.2f} ({m['Max Drawdown']:.2%})"
-        print(f"{'Max Drawdown':<28} {dd_str:>15}")
-        print(f"{'Sharpe Ratio (annualized)':<28} {m['Sharpe Ratio (annualized)']:>15.2f}")
-        if m["Alpha"] is not None:
-            print(f"{'Alpha':<28} {m['Alpha']:>15.4f}")
-            print(f"{'Beta':<28} {m['Beta']:>15.4f}")
-        print("-" * 44)
+
+        summary = []
+        summary.append("--- Backtest Results ---")
+        summary.append(f"{'Initial Equity':<28} ${m['Initial Equity']:>15,.2f}")
+        summary.append(f"{'Final Equity':<28} ${m['Final Equity']:>15,.2f}")
+        summary.append(f"{'Total PnL':<28} ${m['Total PnL']:>15,.2f}")
+        summary.append(f"{'Total Fees':<28} ${m['Total Fees']:>15,.2f}")
+        summary.append(f"{'Net PnL':<28} ${m['Net PnL']:>15,.2f}")
+        summary.append(f"{'Total Trades':<28} {m['Total Trades']:>15}")
+        summary.append(f"{'Win Rate':<28} {m['Win Rate']:>14.2f}%")
+        summary.append(f"{'Profit Factor':<28} {m['Profit Factor']:>15.2f}")
+        summary.append(f"{'Avg Win':<28} ${m['Avg Win']:>15,.2f}")
+        summary.append(f"{'Avg Loss':<28} ${m['Avg Loss']:>15,.2f}")
+        summary.append(f"{'Reward/Risk Ratio':<28} {m['Reward/Risk Ratio']:>14.2f}:1")
+        summary.append(f"{'Max Drawdown':<28} {dd_str:>15}")
+        summary.append(f"{'Sharpe Ratio (annualized)':<28} {m['Sharpe Ratio (annualized)']:>15.2f}")
+        if m['Alpha'] is not None:
+            summary.append(f"{'Alpha':<28} {m['Alpha']:>15.4f}")
+            summary.append(f"{'Beta':<28} {m['Beta']:>15.4f}")
+        summary.append("--------------------------------------------")
+
+        return "\n".join(summary)
+
+    # --- MODIFIED: This method now uses the string generator ---
+    def print_summary(self):
+        """Prints the formatted backtest results to the console."""
+        print("\n" + self.get_summary_string())
 
     def plot_equity_curve(self) -> None:
         if self.equity_curve.empty or "drawdown" not in self.equity_curve.columns:

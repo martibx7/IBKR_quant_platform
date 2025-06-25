@@ -3,6 +3,7 @@
 # -------------------------------------------------
 backtest:
   initial_cash: 100000
+  scale_down_on_insufficient_cash: true
   timezone: "America/New_York"
   data_dir: 'data/historical'
   feather_dir: 'data/feather'

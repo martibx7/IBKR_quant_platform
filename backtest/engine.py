@@ -192,6 +192,11 @@ class BacktestEngine:
                     results[symbol] = filtered_df
         return results
 
+    def log_summary_to_strategy(self, summary_string: str):
+        """Passes the final summary string to the strategy for logging."""
+        if hasattr(self.strategy, 'log_summary'):
+            self.strategy.log_summary(summary_string)
+
     def run(self):
         engine_logger.info(f"Starting backtest for period: {self.test_start_dt.date()} to {self.test_end_dt.date()}...")
         lookback_period = self.strategy.get_required_lookback()

@@ -48,3 +48,7 @@ class VWAPCalculator:
             bands[f'lower_{s}s'] = vwap - (s * std_dev)
 
         return {'vwap': vwap, 'bands': bands}
+
+    def get_cumulative_volume(self) -> float:
+        """Returns the current running cumulative volume."""
+        return self.cumulative_volume

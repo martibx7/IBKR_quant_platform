@@ -6,7 +6,6 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import sys
-from sqlalchemy import create_engine, text
 
 # Add the project root to the Python path
 project_root = Path(__file__).resolve().parents[1]
@@ -21,20 +20,45 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# --- DB Connection Logic ---
-def get_db_engine(config: dict):
-    db_config = config['database']
-    db_type = db_config['type']
-    if db_type == 'postgresql':
-        conn_str = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
-        return create_engine(conn_str)
-    elif db_type == 'sqlite':
-        db_path = Path(project_root) / db_config.get('db_path', 'data/price_data.db')
-        return create_engine(f"sqlite:///{db_path}")
-    else:
-        raise ValueError(f"Unsupported database type: {db_type}")
+# --- REMOVED: Database connection logic is no longer needed ---
+# def get_db_engine(config: dict): ...
 
-# --- OPTIMIZED: New analysis function ---
+# --- NEW: Function to load data from Feather files ---
+def load_data_from_feather(symbol: str, feather_dir: Path, start_date: pd.Timestamp, end_date: pd.Timestamp, lookback_days: int) -> pd.DataFrame:
+    """
+    Loads and filters historical data for a symbol from a .feather file.
+    """
+    feather_path = feather_dir / f"{symbol}.feather"
+    if not feather_path.exists():
+        logging.warning(f"Data file not found for symbol {symbol} at {feather_path}, skipping.")
+        return pd.DataFrame()
+
+    df = pd.read_feather(feather_path)
+
+    # Ensure timestamp column is a datetime type and set it as the index
+    if 'timestamp' not in df.columns:
+        raise ValueError(f"'timestamp' column not found in {feather_path}")
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df.set_index('timestamp', inplace=True)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Determine the full date range needed, including the lookback period
+    query_start_date = start_date - pd.Timedelta(days=lookback_days * 2) if start_date else None
+    query_end_date = end_date
+
+    # Filter the DataFrame by date range, similar to the old SQL query
+    mask = pd.Series(True, index=df.index)
+    if query_start_date:
+        mask &= (df.index.normalize() >= query_start_date.normalize())
+    if query_end_date:
+        mask &= (df.index.normalize() <= query_end_date.normalize())
+
+    return df.loc[mask]
+
+
+# --- OPTIMIZED: New analysis function (Unchanged) ---
 def analyze_symbol_stability_fast(df: pd.DataFrame, lookback_days: int, profiler, symbol: str) -> list:
     """
     Efficiently calculates daily POC dispersion using a rolling window approach.
@@ -44,12 +68,14 @@ def analyze_symbol_stability_fast(df: pd.DataFrame, lookback_days: int, profiler
 
     # 1. Pre-calculate the POC for every single day
     daily_pocs_data = []
-    for date, day_df in df.groupby(pd.Grouper(freq='D')):
+    # Group by the date part of the DatetimeIndex
+    for date, day_df in df.groupby(df.index.date):
         if day_df.empty:
             continue
         stats = profiler.calculate(day_df)
         if stats and 'poc_price' in stats:
-            daily_pocs_data.append({'date': date, 'poc': stats['poc_price']})
+            # Use pd.to_datetime to ensure the date is a timestamp for the DataFrame index
+            daily_pocs_data.append({'date': pd.to_datetime(date), 'poc': stats['poc_price']})
 
     if not daily_pocs_data:
         return []
@@ -57,8 +83,8 @@ def analyze_symbol_stability_fast(df: pd.DataFrame, lookback_days: int, profiler
     poc_df = pd.DataFrame(daily_pocs_data).set_index('date')
 
     # 2. Use pandas' highly optimized rolling functions
-    poc_df['rolling_std'] = poc_df['poc'].rolling(window=lookback_days).std()
-    poc_df['rolling_mean'] = poc_df['poc'].rolling(window=lookback_days).mean()
+    poc_df['rolling_std'] = poc_df['poc'].rolling(window=lookback_days, min_periods=lookback_days).std()
+    poc_df['rolling_mean'] = poc_df['poc'].rolling(window=lookback_days, min_periods=lookback_days).mean()
 
     # 3. Calculate dispersion and format results
     poc_df['poc_dispersion'] = poc_df['rolling_std'] / poc_df['rolling_mean']
@@ -79,15 +105,31 @@ def main(args):
     end_date_str = input("Enter analysis end date (YYYY-MM-DD) or press Enter for all history: ")
 
     try:
-        start_date = pd.to_datetime(start_date_str) if start_date_str else None
-        end_date = pd.to_datetime(end_date_str) if end_date_str else None
+        # --- MODIFIED: Localize input dates to UTC to match the data's timezone ---
+        if start_date_str:
+            # Convert string to a naive timestamp, then localize to UTC
+            start_date = pd.to_datetime(start_date_str).tz_localize('UTC')
+        else:
+            start_date = None
+
+        if end_date_str:
+            # Do the same for the end date
+            end_date = pd.to_datetime(end_date_str).tz_localize('UTC')
+        else:
+            end_date = None
+        # --- END MODIFICATION ---
+
     except Exception as e:
         logging.error(f"Invalid date format: {e}. Please use YYYY-MM-DD.")
         return
 
+    # Load config and get feather directory path
     config_path = Path(project_root) / 'config.yaml'
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
+
+    feather_dir = Path(project_root) / config['backtest']['feather_dir']
+    logging.info(f"Using data from Feather directory: '{feather_dir}'")
 
     symbol_file = Path(project_root) / args.symbols
     with open(symbol_file, 'r') as f:
@@ -100,36 +142,21 @@ def main(args):
     logging.info(f"Using {profile_type} profiler with a {args.lookback} day lookback.")
 
     all_results = []
-    engine = get_db_engine(config)
 
     for symbol in tqdm(symbols, desc="Analyzing Symbols"):
         try:
-            # We fetch a slightly larger window to ensure the lookback period is valid
-            query_start_date = start_date - pd.Timedelta(days=args.lookback * 2) if start_date else None
-            query_end_date = end_date
-
-            query_parts = ["SELECT timestamp, open, high, low, close, volume, date FROM price_data WHERE symbol = :symbol"]
-            params = {'symbol': symbol}
-
-            if query_start_date:
-                query_parts.append("AND date >= :start_date")
-                params['start_date'] = query_start_date.date()
-            if query_end_date:
-                query_parts.append("AND date <= :end_date")
-                params['end_date'] = query_end_date.date()
-
-            query = " ".join(query_parts)
-
-            df = pd.read_sql(text(query), engine, params=params, index_col='timestamp', parse_dates=['timestamp'])
+            # Replaced SQL query with Feather file loading function
+            df = load_data_from_feather(symbol, feather_dir, start_date, end_date, args.lookback)
 
             if df.empty:
                 continue
 
-            # Call the new, faster analysis function
+            # Call the analysis function (logic is unchanged)
             symbol_results = analyze_symbol_stability_fast(df, args.lookback, profiler, symbol)
 
             # Filter results to only include dates within the user's requested range
             if start_date:
+                # Compare the date part of the result with the date part of the start_date
                 symbol_results = [res for res in symbol_results if res[0] >= start_date.date()]
 
             all_results.extend(symbol_results)
@@ -156,7 +183,8 @@ if __name__ == '__main__':
     parser.add_argument('--profile_type', type=str, default='volume', choices=['volume', 'market'], help="The type of profile to use for POC calculation.")
     parser.add_argument('--lookback', type=int, default=10, help="The lookback period in days for the stability calculation.")
     parser.add_argument('--output', type=str, default='diagnostics/poc_dispersion_analysis.csv', help="Path to save the output CSV file.")
-    parser.add_argument('--config', type=str, default='config.yaml', help="Path to the main configuration file.")
+    # Config argument is no longer needed as the path is now standardized
+    # parser.add_argument('--config', type=str, default='config.yaml', help="Path to the main configuration file.")
 
     args = parser.parse_args()
     main(args)

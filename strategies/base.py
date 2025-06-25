@@ -33,7 +33,8 @@ class BaseStrategy(ABC):
                     logger.removeHandler(handler)
 
             if not logger.handlers:
-                handler = logging.FileHandler(log_file, mode='w')
+                # The fix is adding encoding='utf-8' to the line below
+                handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
                 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)

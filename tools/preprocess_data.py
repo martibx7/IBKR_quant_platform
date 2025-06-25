@@ -12,27 +12,23 @@ def main():
     For each CSV in the backtest data directory, this script will:
       1. Read the CSV (parsing 'date' to datetime).
       2. Standardize columns (lowercase, rename 'date' to 'timestamp').
-      3. Create 'date' column as 'YYYY-MM-DD' and add 'symbol'.
+      3. Create 'date' column as a normalized datetime object and add 'symbol'.
       4. Reorder to ['timestamp','date','symbol','open','high','low','close','volume'].
       5. Write out a corresponding .feather file in data/feather/.
 
     Can be run from either the project root or the tools folder.
     """
-    # Determine project root based on this script's location
     script_path = os.path.abspath(__file__)
     project_root = os.path.dirname(os.path.dirname(script_path))
     config_path = os.path.join(project_root, 'config.yaml')
 
-    # Load config
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    # Input and output directories
     data_dir = os.path.join(project_root, config['backtest']['data_dir'])
-    feather_dir = os.path.join(project_root, 'data', 'feather')
+    feather_dir = os.path.join(project_root, config['backtest'].get('feather_dir', 'data/feather'))
     os.makedirs(feather_dir, exist_ok=True)
 
-    # Find all CSV files
     all_files = [f for f in os.listdir(data_dir) if f.lower().endswith('.csv')]
     if not all_files:
         print(f"No CSV files found in '{data_dir}'")
@@ -42,22 +38,19 @@ def main():
     for filename in tqdm(all_files, desc='Preprocessing'):
         csv_path = os.path.join(data_dir, filename)
         try:
-            # 1. Read and parse date
             df = pd.read_csv(csv_path, parse_dates=['date'])
 
-            # 2. Standardize column names
             df.columns = [col.strip().lower() for col in df.columns]
             df.rename(columns={'date': 'timestamp'}, inplace=True)
 
-            # 3. Add derived columns
-            df['date'] = df['timestamp'].dt.strftime('%Y-%m-%d')
+            # --- FIX: Store date as a datetime object, not a string ---
+            df['date'] = df['timestamp'].dt.normalize()
+
             symbol = os.path.splitext(filename)[0]
             df['symbol'] = symbol
 
-            # 4. Reorder columns
             df = df[['timestamp', 'date', 'symbol', 'open', 'high', 'low', 'close', 'volume']]
 
-            # 5. Write to Feather
             out_path = os.path.join(feather_dir, f"{symbol}.feather")
             df.to_feather(out_path)
         except Exception as e:

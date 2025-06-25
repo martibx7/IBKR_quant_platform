@@ -3,7 +3,9 @@
 # -------------------------------------------------
 backtest:
   initial_cash: 100000
+  timezone: "America/New_York"
   data_dir: 'data/historical'
+  feather_dir: 'data/feather'
   tick_size_market_profile: 0.01
   tick_size_volume_profile: 0.01
   atr_period: 14
@@ -11,15 +13,6 @@ backtest:
   slippage_pct: 0.0005           # 0 .05 %
   # symbol_file: 'strategies/sp_500.txt'
 
-# ------------------ data source ------------------
-database:
-  type: 'postgresql'              # 'postgresql' | 'sqlite'
-  host: 'localhost'
-  port: 5433
-  user: 'quantuser'
-  password: 'quantpassword'
-  dbname: 'quant_platform'
-  db_path: 'data/price_data.db'   # used only if type == sqlite
 
 # ------------------ strategies -------------------
 strategy:
@@ -29,7 +22,6 @@ strategy:
     # -- Volume-Accumulation (unchanged) ----------
     VolumeAccumulationStrategy:
       log_file: 'logs/volume_accumulation_v3.log'
-      timezone: 'America/New_York'
       risk_per_trade_pct: 0.01
       min_price: 3.00
       max_price: 400.00
@@ -56,14 +48,13 @@ strategy:
     # -- Value-Area Fade  -----------
     ValueAreaFadeStrategy:
       log_file: 'logs/value_area_fade.log'
-      timezone: 'America/New_York'
 
       # -------- profile settings
       profile_type: 'volume'          # 'volume' | 'market'
 
       # -------- watch-list
-      use_symbol_file: false
-      symbol_file: 'strategies/10.txt'   # one ticker per line
+      use_symbol_file: true
+      symbol_file: 'strategies/sp_500.txt'   # one ticker per line
 
       # -------- session timing
       session_open_time: '09:30:00'   # used for gap-size check
@@ -75,9 +66,9 @@ strategy:
         minutes: 30
 
       # -------- calculations & filters
-      lookback_days: 15
-      poc_lookback_days: 10
-      poc_dispersion_threshold: 0.0145  # min std-dev of POC over lookback period
+      lookback_days: 14
+      poc_lookback_days: 5
+      poc_dispersion_threshold: 0.015  # max std-dev of POC over lookback period
       value_area_pct: 0.70
       confirmation_window_minutes: 0
       primary_target: 'poc'            # 'poc' | 'vah' (replaces use_poc_target)
@@ -89,9 +80,9 @@ strategy:
         ratio_threshold: 2.0  # Volume must be 2x the time-of-day average
 
       # --- NEW volatility / structure controls
-      min_atr_pct: 0.02
+      min_atr_pct: 0.00           # min ATR as % of price to consider trade
       atr_stop_mult: 1.0              # stop = entry - 0.5 * ATR
-      gap_skip_threshold: 1         # skip day if open gap >= 1 ATR
+      gap_skip_threshold: 0         # skip day if open gap >= 1 ATR
       allowed_shapes: ['D', 'B', 'P', 'L']           # options: ['D', 'B', 'P', 'L', 'T']
 
       # --- Trigger & Gate (v4.1.0) ----

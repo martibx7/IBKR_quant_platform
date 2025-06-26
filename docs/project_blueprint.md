@@ -22,3 +22,4 @@ Next Steps After Implementation:
 Explore Walk-Forward Optimization as a more robust method than a simple Grid Search.
 Investigate developing a Statistical Arbitrage (Pairs Trading) strategy, which is a perfect fit for the existing framework and a feasible path for a retail quant.
 Develop estimation of Cummulative Volume Delta (CVD) as a feature for ML models, which can provide insights into market sentiment and liquidity.
+Dask for Parallel Processing:?

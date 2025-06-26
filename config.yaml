@@ -74,7 +74,7 @@ strategy:
       confirmation_window_minutes: 0
       primary_target: 'poc'            # 'poc' | 'vah' (replaces use_poc_target)
       min_dip_ticks: 0
-      min_reward_risk_ratio: 1  # min R/R ratio to enter trade
+      min_reward_risk_ratio: 1.5  # min R/R ratio to enter trade
       use_vwap_filter: false
       relative_volume_filter:
         enable: false
@@ -83,8 +83,8 @@ strategy:
       # --- NEW volatility / structure controls
       min_atr_pct: 0.00           # min ATR as % of price to consider trade
       atr_stop_mult: 1.0              # stop = entry - 0.5 * ATR
-      gap_skip_threshold: 0         # skip day if open gap >= 1 ATR
-      allowed_shapes: ['D', 'B', 'P', 'L']           # options: ['D', 'B', 'P', 'L', 'T']
+      gap_skip_threshold: 1         # skip day if open gap >= 1 ATR
+      allowed_shapes: ['D','B','P']           # options: ['D', 'B', 'P', 'L', 'T']
 
       # --- Trigger & Gate (v4.1.0) ----
       trigger_config:
@@ -97,7 +97,7 @@ strategy:
         sigma_level: 2.0
 
       # -------- risk / sizing
-      risk_per_trade_pct: 0.05
+      risk_per_trade_pct: 0.01
       liquidity_cap_pct: 0.05
 
 

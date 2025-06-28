@@ -14,6 +14,9 @@ venv/
 .tmp.drivedownload/
 .tmp.driveupload
 
+#PostgreSQL
+postgres_data/
+
 # IDE / Editor
 .idea/
 .vscode/

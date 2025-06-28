@@ -1,78 +1,111 @@
 # backtest/engine.py
 
-import yaml
 import pandas as pd
-import os
 import logging
 from tqdm import tqdm
-from datetime import datetime, timedelta
-from typing import Union
-from sqlalchemy import create_engine, text
-
-from core.ledger import BacktestLedger
-from backtest.results import BacktestResults
-from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
-from analytics.profiles import get_session
 from importlib import import_module
+from zoneinfo import ZoneInfo
+from datetime import date
+import yaml
+import os
 import re
 
 
-engine_logger = logging.getLogger(__name__)
+from core.ledger import BacktestLedger
+from core.fee_models import ZeroFeeModel, TieredIBFeeModel, FixedFeeModel
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+engine_logger = logging.getLogger(__name__)
 
 def camel_to_snake(name):
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
     return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
 class BacktestEngine:
-    # ... (init and other methods are unchanged) ...
     def __init__(self, config_path: str, start_date: str, end_date: str):
         self.config = self._load_config(config_path)
         self.strategy_name = self.config['strategy']['name']
-        self.strategy_params = self.config['strategy']['parameters'].get(self.strategy_name, {})
         self.backtest_params = self.config['backtest']
-        self.data_source_config = self.config.get('data_source', {'type': 'csv'})
+        tz_name = self.backtest_params.get("timezone", "UTC")
+        self.tz = ZoneInfo(tz_name)
         self.fee_config = self.config.get('fees', {'model': 'zero'})
 
-        self.start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-        self.end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+        self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        feather_path = self.backtest_params.get('feather_dir', 'data/feather')
+        self.feather_dir = os.path.join(self.project_root, feather_path)
 
-        self.all_data = {}
-        self.session_data = {}
-        self.master_data_df = None
-
-        self.db_engine = None
-        if self.data_source_config.get('type') == 'sqlite':
-            db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'price_data.db')
-            if not os.path.exists(db_path): raise FileNotFoundError(f"Database not found at {db_path}. Please run tools/populate_db.py")
-            self.db_engine = create_engine(f'sqlite:///{db_path}')
+        # --- NEW: Store the user's desired TEST period ---
+        self.test_start_dt = pd.Timestamp(start_date, tz=self.tz)
+        self.test_end_dt   = pd.Timestamp(end_date,   tz=self.tz)
 
         self.ledger = BacktestLedger(
             initial_cash=self.backtest_params['initial_cash'],
-            fee_model=self._initialize_fee_model()
+            fee_model=self._initialize_fee_model(),
+            slippage_model=self.backtest_params.get('slippage_model', 'none'),
+            slippage_pct=self.backtest_params.get('slippage_pct', 0.0)
         )
 
-        self.available_symbols = self._get_available_symbols()
-        self.strategy = self._initialize_strategy()
+        # --- REVISED ORDER OF OPERATIONS ---
+        # 1. Get the full universe of symbols available in the data directory.
+        engine_logger.info("Scanning for all available symbols...")
+        available_symbols = self._get_liquid_symbols()
 
-        if self.data_source_config.get('type') == 'sqlite':
-            self._preload_all_data()
+        # 2. Initialize the strategy to determine which symbols it will use and its lookback period.
+        self.strategy, self.symbols = self._initialize_strategy(available_symbols)
 
-        self._build_trading_calendar()
+        # 3. Load data ONLY for the symbols the strategy requires.
+        self.data_store = self._load_all_data_from_feather()
+
+        # 4. Generate the FULL trading calendar from all available data.
+        # This will be used for slicing lookback periods.
+        self.full_trading_calendar = self._get_all_trading_dates()
+
+        # 5. Generate the TEST calendar, which the backtest will loop over.
+        # This ensures the backtest only runs on the user-specified dates.
+        self.test_trading_calendar = [
+            dt for dt in self.full_trading_calendar
+            if self.test_start_dt.date() <= dt <= self.test_end_dt.date()
+        ]
+
+        if not self.test_trading_calendar:
+            raise ValueError("The specified date range contains no trading days found in the data.")
+
+        engine_logger.info(f"Test period contains {len(self.test_trading_calendar)} trading days.")
+
+        self.current_prices = {s: 0 for s in self.symbols}
+
+
+    def _get_liquid_symbols(self) -> list[str]:
+        engine_logger.info(f"Scanning for all available symbols in {self.feather_dir}...")
+        if not os.path.exists(self.feather_dir):
+            raise FileNotFoundError(f"Feather data directory not found: {self.feather_dir}")
+
+        symbols = [os.path.splitext(f)[0] for f in os.listdir(self.feather_dir) if f.endswith('.feather')]
+        engine_logger.info(f"Found {len(symbols)} total available symbols.")
+        return symbols
+
+    def _load_all_data_from_feather(self) -> dict[str, pd.DataFrame]:
+        engine_logger.info(f"Pre-loading data for {len(self.symbols)} strategy-specific symbols...")
+        data_store = {}
+        # This now iterates over the CORRECT, larger list of symbols (if SPY was added).
+        for symbol in tqdm(self.symbols, desc="Loading Feather Files"):
+            file_path = os.path.join(self.feather_dir, f"{symbol}.feather")
+            if os.path.exists(file_path):
+                df = pd.read_feather(file_path)
+                df.set_index("timestamp", inplace=True)
+                df.index = pd.to_datetime(df.index, utc=True).tz_convert(self.tz)
+
+                df["date"] = df.index.date
+
+                df.columns = [col.lower() for col in df.columns]
+                data_store[symbol] = df
+            else:
+                engine_logger.warning(f"Feather file for symbol {symbol} not found at {file_path}. Skipping.")
+        return data_store
 
     def _load_config(self, path: str):
         with open(path, 'r') as f:
             return yaml.safe_load(f)
-
-    def _get_available_symbols(self):
-        if self.data_source_config.get('type') == 'sqlite':
-            engine_logger.info("Fetching available symbols from database...")
-            with self.db_engine.connect() as connection:
-                result = connection.execute(text("SELECT DISTINCT symbol FROM price_data"))
-                return [row[0] for row in result]
-        else: # Fallback for CSV
-            data_dir = self.backtest_params.get('data_dir', 'data/historical')
-            return [os.path.splitext(f)[0] for f in os.listdir(data_dir) if f.endswith('.csv')]
 
     def _initialize_fee_model(self):
         model_name = self.fee_config.get('model', 'zero').lower()
@@ -82,7 +115,11 @@ class BacktestEngine:
             return FixedFeeModel(**self.fee_config.get('fixed', {}))
         return ZeroFeeModel()
 
-    def _initialize_strategy(self):
+    def _initialize_strategy(self, available_symbols: list) -> tuple:
+        """
+        MODIFIED: Initializes the strategy and returns the instance and the final list
+        of symbols the strategy will operate on, ensuring SPY is included.
+        """
         strategy_module_name = camel_to_snake(self.strategy_name)
         strategy_module_path = f'strategies.{strategy_module_name}'
         try:
@@ -91,151 +128,124 @@ class BacktestEngine:
         except (ImportError, AttributeError) as e:
             raise ImportError(f"Could not find strategy '{self.strategy_name}' in '{strategy_module_path}.py'. Error: {e}")
 
-        self.strategy_params['tick_size'] = self.backtest_params.get('tick_size_volume_profile', 0.01)
-        symbols_to_use = self.strategy_params.get('symbols') or self.available_symbols
-        return strategy_class(symbols=symbols_to_use, ledger=self.ledger, **self.strategy_params)
+        all_strategy_params = self.config['strategy'].get('parameters', {})
+        active_strategy_params = all_strategy_params.get(self.strategy_name, {})
 
-    def _preload_all_data(self):
-        engine_logger.info("Preloading all data for the backtest period... (This may take a moment)")
-        lookback_days = self.strategy_params.get('consolidation_days', 10) + 20
-        full_range_start_date = self.start_date - timedelta(days=lookback_days)
+        final_symbols = []
+        use_file = active_strategy_params.get('use_symbol_file', False)
+        symbol_file_path = active_strategy_params.get('symbol_file')
 
-        liquid_symbols_query = """
-            SELECT symbol FROM (
-                SELECT symbol, date, SUM(volume) as daily_volume FROM price_data
-                WHERE date BETWEEN ? AND ? GROUP BY symbol, date
-            ) GROUP BY symbol HAVING AVG(daily_volume) >= ? """
+        if use_file and symbol_file_path:
+            full_path = os.path.join(self.project_root, symbol_file_path)
+            try:
+                with open(full_path, 'r') as f:
+                    symbols_from_file = {line.strip().upper() for line in f if line.strip()}
+                final_symbols = list(set(available_symbols) & symbols_from_file)
+                engine_logger.info(f"Strategy will use {len(final_symbols)} symbols found in both the file and data directory.")
+            except FileNotFoundError:
+                engine_logger.error(f"Symbol file not found: {full_path}. Defaulting to all available symbols.")
+                final_symbols = available_symbols
+        else:
+            final_symbols = available_symbols
+            engine_logger.info(f"Strategy will use all {len(final_symbols)} available symbols.")
 
-        liquid_symbols_df = pd.read_sql(
-            liquid_symbols_query, self.db_engine,
-            params=(full_range_start_date.strftime('%Y-%m-%d'), self.end_date.strftime('%Y-%m-%d'), self.backtest_params.get('min_avg_daily_volume', 0))
+        # --- THIS IS THE FIX ---
+        # Ensure SPY is always included for benchmark calculations.
+        # We use a set for an efficient check.
+        if 'SPY' not in set(final_symbols):
+            engine_logger.info("Adding 'SPY' to symbol list for benchmark calculations.")
+            final_symbols.append('SPY')
+
+        # Pass the original symbol list (without SPY unless specified) to the strategy
+        strategy_symbols = [s for s in final_symbols if s != 'SPY'] if 'SPY' not in (set(available_symbols) if use_file else set()) else final_symbols
+
+        strategy_instance = strategy_class(
+            symbols=strategy_symbols, # Pass the original list to the strategy
+            ledger=self.ledger,
+            config=self.config,
+            timezone=self.tz,
+            **active_strategy_params
         )
-        liquid_symbols = liquid_symbols_df['symbol'].tolist()
-        if not liquid_symbols:
-            self.master_data_df = pd.DataFrame()
-            return
+        # The engine itself will use the list that includes SPY
+        return strategy_instance, final_symbols
 
-        placeholders = ','.join('?' for _ in liquid_symbols)
-        price_data_query = f"SELECT * FROM price_data WHERE date BETWEEN ? AND ? AND symbol IN ({placeholders})"
 
-        params = tuple([full_range_start_date.strftime('%Y-%m-%d'), self.end_date.strftime('%Y-%m-%d')] + liquid_symbols)
 
-        self.master_data_df = pd.read_sql(
-            price_data_query, self.db_engine,
-            params=params,
-            parse_dates=['timestamp']
-        )
+    def _get_all_trading_dates(self) -> list[date]:
+        """Generates a sorted list of all unique trading dates from the data store."""
+        all_dates = set()
+        for df in self.data_store.values():
+            all_dates.update(df['date'].unique())
 
-        if not self.master_data_df.empty:
-            self.master_data_df.set_index('timestamp', inplace=True)
-            self.master_data_df = self.master_data_df.tz_localize('UTC')
-            self.master_data_df['date_obj'] = self.master_data_df.index.date
+        return sorted(list(all_dates))
 
-        engine_logger.info(f"Successfully preloaded {len(self.master_data_df)} rows into memory.")
 
-    def _build_trading_calendar(self):
-        engine_logger.info("Building trading calendar...")
-        if self.data_source_config.get('type') == 'sqlite':
-            if self.master_data_df is not None and not self.master_data_df.empty:
-                all_dates = self.master_data_df['date_obj'].unique()
-                self.trading_calendar = sorted([d for d in all_dates if self.start_date <= d <= self.end_date])
-            else:
-                self.trading_calendar = []
-        else: # Fallback for CSV
-            all_dates = set()
-            data_dir = self.backtest_params['data_dir']
-            for symbol in self.available_symbols:
-                file_path = os.path.join(data_dir, f"{symbol}.csv")
-                if os.path.exists(file_path):
-                    df = pd.read_csv(file_path, usecols=['date'], parse_dates=['date'])
-                    all_dates.update(df['date'].dt.date)
-            self.trading_calendar = sorted([d for d in all_dates if self.start_date <= d <= self.end_date])
+    def _fetch_data(self, dates_to_fetch: list) -> dict[str, pd.DataFrame]:
+        if not self.symbols or not dates_to_fetch: return {}
 
-        engine_logger.info(f"Calendar built with {len(self.trading_calendar)} unique trading days.")
+        results = {}
+        for symbol in self.symbols:
+            if symbol in self.data_store:
+                df = self.data_store[symbol]
+                filtered_df = df[df['date'].isin(dates_to_fetch)]
+                if not filtered_df.empty:
+                    results[symbol] = filtered_df
+        return results
 
-    def _load_data_for_day(self, trade_date: datetime.date):
-        if self.data_source_config.get('type') == 'sqlite':
-            lookback_days = self.strategy_params.get('consolidation_days', 10) + 20
-            lookback_start_date = trade_date - timedelta(days=lookback_days)
+    def log_summary_to_strategy(self, summary_string: str):
+        """Passes the final summary string to the strategy for logging."""
+        if hasattr(self.strategy, 'log_summary'):
+            self.strategy.log_summary(summary_string)
 
-            daily_slice_df = self.master_data_df[
-                (self.master_data_df['date_obj'] >= lookback_start_date) &
-                (self.master_data_df['date_obj'] < trade_date + timedelta(days=1))
-                ]
-            if daily_slice_df.empty:
-                self.all_data = {}
-                return
+    def run(self):
+        engine_logger.info(f"Starting backtest for period: {self.test_start_dt.date()} to {self.test_end_dt.date()}...")
+        lookback_period = self.strategy.get_required_lookback()
 
-            daily_slice_df_renamed = daily_slice_df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume', 'symbol': 'Symbol'})
+        for trade_date in tqdm(self.test_trading_calendar, desc="Running Backtest"):
+            self.ledger.settle_funds(trade_date)
 
-            # --- FIX: Keep the 'date' column for accurate day counting in the strategy ---
-            self.all_data = {symbol: group.drop(columns=['Symbol', 'date_obj']) for symbol, group in daily_slice_df_renamed.groupby('Symbol')}
+            try:
+                current_date_index = self.full_trading_calendar.index(trade_date)
+            except ValueError:
+                engine_logger.warning(f"Trade date {trade_date} not found in full calendar. Skipping.")
+                continue
 
-        else: # Logic for CSV
-            self.all_data = {}
-            data_dir = self.backtest_params['data_dir']
-            for symbol in self.available_symbols:
-                file_path = os.path.join(data_dir, f"{symbol}.csv")
-                if os.path.exists(file_path):
-                    df = pd.read_csv(file_path, parse_dates=['date'], index_col='date')
-                    df.columns = [col.strip().lower() for col in df.columns]
-                    # Reset index to get 'date' as a column, then rename
-                    df.reset_index(inplace=True)
-                    df = df.rename(columns={'date': 'timestamp', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
-                    df.set_index('timestamp', inplace=True)
-                    # Ensure timezone awareness for CSV to match strategy expectations
-                    if df.index.tz is None:
-                        df = df.tz_localize('UTC')
-                    # Add the text 'date' column for the strategy
-                    df['date'] = df.index.strftime('%Y-%m-%d')
-                    self.all_data[symbol] = df
+            if current_date_index < lookback_period:
+                engine_logger.warning(f"Not enough historical data for {trade_date}. Need {lookback_period} days, have {current_date_index}. Skipping day.")
+                continue
 
-    def _get_previous_trading_day(self, current_date_obj: datetime.date) -> Union[datetime.date, None]:
-        try:
-            idx = self.trading_calendar.index(current_date_obj)
-            return self.trading_calendar[idx - 1] if idx > 0 else None
-        except ValueError:
-            return next((d for d in reversed(self.trading_calendar) if d < current_date_obj), None)
+            lookback_start_index = current_date_index - lookback_period
+            lookback_dates = self.full_trading_calendar[lookback_start_index:current_date_index]
+            historical_data = self._fetch_data(lookback_dates)
+            intraday_data = self._fetch_data([trade_date])
 
-    def prepare_for_day(self, trade_date: datetime):
-        self.current_trade_date = trade_date
-        engine_logger.info(f"\n--- Preparing for trade date: {trade_date.strftime('%Y-%m-%d')} ---")
-        self.ledger.settle_funds()
-        if trade_date.date() not in self.trading_calendar:
-            engine_logger.warning(f"Date {trade_date.strftime('%Y-%m-%d')} not in trading calendar. Skipping day.")
-            self.session_data = {}
-            return
-        self._load_data_for_day(trade_date.date())
-        self.prev_trade_date = self._get_previous_trading_day(trade_date.date())
-        if not self.prev_trade_date:
-            engine_logger.warning(f"No previous trading day found for {trade_date.strftime('%Y-%m-%d')}. Cannot scan for candidates.")
-            self.session_data = {}
-            return
-        candidate_symbols = self.strategy.scan_for_candidates(self.all_data, self.prev_trade_date)
-        engine_logger.info(f"Preparation complete. Found {len(candidate_symbols)} candidates for today.")
-        self.session_data = {}
-        for symbol in candidate_symbols:
-            if symbol in self.all_data:
-                symbol_data_full = self.all_data[symbol]
-                symbol_session_data = symbol_data_full[symbol_data_full.index.date == trade_date.date()]
-                if not symbol_session_data.empty:
-                    self.session_data[symbol] = symbol_session_data
+            if not historical_data or not any(v is not None and not v.empty for v in intraday_data.values()):
+                engine_logger.warning(f"Missing historical or intraday data for {trade_date}. Skipping.")
+                continue
 
-    def run_session(self):
-        if not self.session_data:
-            engine_logger.info(f"No session data for {self.current_trade_date.strftime('%Y-%m-%d')}. Nothing to process.")
-            return
-        all_timestamps = sorted(list(set.union(*(set(df.index) for df in self.session_data.values()))))
-        self.strategy.on_session_start(self.session_data)
-        for timestamp in tqdm(all_timestamps, desc=f"Simulating {self.current_trade_date.strftime('%Y-%m-%d')}", leave=False):
-            market_prices = {s: df.loc[timestamp, 'Close'] for s, df in self.session_data.items() if timestamp in df.index}
-            if market_prices:
-                self.ledger._update_equity(timestamp, market_prices)
-            for sym, data in self.session_data.items():
-                if timestamp in data.index:
-                    self.strategy.current_prices[sym] = data.loc[timestamp, 'Close']
-            for sym, data in self.session_data.items():
-                if timestamp in data.index:
-                    bar = data.loc[timestamp]
-                    self.strategy.on_bar(sym, bar)
-        self.strategy.on_session_end()
+            self.strategy.on_market_open(historical_data, intraday_data)
+
+            if not intraday_data:
+                self.strategy.on_session_end()
+                continue
+
+            last_timestamp_today = None
+            # Create a combined DataFrame to iterate through bars chronologically
+            all_intraday_bars = pd.concat(intraday_data.values()).sort_index()
+
+            for timestamp, bar in all_intraday_bars.iterrows():
+                symbol = bar['symbol']
+                # The engine provides all bars, but the strategy's on_bar will filter
+                # for symbols it is explicitly managing.
+                self.strategy.on_bar(symbol, bar)
+                last_timestamp_today = timestamp
+
+            self.strategy.on_session_end()
+            if last_timestamp_today:
+                self.ledger._update_equity(last_timestamp_today, self.strategy.current_prices)
+
+        if hasattr(self.strategy, 'generate_report'):
+            self.strategy.generate_report()
+
+        engine_logger.info("Backtest finished.")
+        return self.ledger

@@ -12,3 +12,5 @@ mplfinance
 SQLAlchemy
 openpyxl
 snakeviz
+psycopg2-binary
+pyarrow

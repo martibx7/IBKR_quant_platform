@@ -1,60 +1,60 @@
-Fri Jun 13 20:54:15 2025    backtest.prof
+Tue Jun 17 20:36:02 2025    backtest.prof
 
-         78206569 function calls (76511983 primitive calls) in 378.505 seconds
+         260882203 function calls (254226825 primitive calls) in 287.482 seconds
 
    Ordered by: cumulative time
-   List reduced from 9730 to 50 due to restriction <50>
+   List reduced from 6722 to 50 due to restriction <50>
 
    ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-     11/5    0.000    0.000  492.941   98.588 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\matplotlib\text.py:73(_get_text_metrics_with_cache_impl)
-     13/5    0.029    0.002  492.940   98.588 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\matplotlib\backends\backend_agg.py:206(get_text_width_height_descent)
-    221/4    0.002    0.000  490.884  122.721 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\matplotlib\text.py:926(get_window_extent)
-    230/3    0.007    0.000  361.209  120.403 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\matplotlib\text.py:358(_get_layout)
-       22    4.330    0.197  196.754    8.943 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:165(prepare_for_day)
-    498/7    0.001    0.000  180.883   25.840 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\matplotlib\text.py:65(_get_text_metrics_with_cache)
-       21    7.469    0.356  127.614    6.077 C:\Users\beast\Documents\Projects\IBKR_quant_platform\strategies\volume_accumulation_strategy.py:52(scan_for_candidates)
-        1    0.000    0.000   94.406   94.406 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:28(__init__)
-4955086/4798038    1.108    0.000   70.100    0.000 {built-in method builtins.getattr}
-   475257    0.192    0.000   69.348    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\indexes\extension.py:67(fget)
-    58492   68.534    0.001   68.778    0.001 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\arrays\datetimes.py:1453(date)
-        1    0.038    0.038   62.724   62.724 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:94(_preload_all_data)
-       22    3.187    0.145   60.698    2.759 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:141(_load_data_for_day)
-        2    0.992    0.496   59.043   29.522 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:572(read_sql)
-        2    0.000    0.000   58.050   29.025 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:1791(read_query)
-        6    0.092    0.015   39.854    6.642 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:1319(fetchall)
-        6   10.920    1.820   39.762    6.627 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:543(_allrows)
-        1    0.000    0.000   31.024   31.024 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:63(_get_available_symbols)
-     1380    0.001    0.000   31.017    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:526(iterrows)
-     1380    0.001    0.000   31.016    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:2122(_fetchiter_impl)
-     1380    0.000    0.000   31.016    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:1099(fetchone)
-     1381   31.015    0.022   31.015    0.022 {method 'fetchone' of 'sqlite3.Cursor' objects}
-        6    0.000    0.000   28.842    4.807 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:2134(_fetchall_impl)
-        6    1.394    0.232   28.842    4.807 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:1131(fetchall)
-        6   27.448    4.575   27.448    4.575 {method 'fetchall' of 'sqlite3.Cursor' objects}
-    82876    0.446    0.000   24.665    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:4046(take)
-    82876    0.267    0.000   22.937    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\internals\managers.py:869(take)
-113858/94473    0.153    0.000   22.648    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\ops\common.py:62(new_method)
-    98627    0.518    0.000   22.636    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\frame.py:4067(__getitem__)
-       12    0.334    0.028   19.906    1.659 C:\Users\beast\Documents\Projects\IBKR_quant_platform\analytics\profiles.py:41(calculate)
-    58394    0.215    0.000   19.470    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\frame.py:4135(_getitem_bool_array)
-    82853    0.193    0.000   19.452    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:4161(_take_with_is_copy)
-   103313    0.566    0.000   18.997    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\internals\managers.py:623(reindex_indexer)
-        2   17.769    8.884   17.769    8.884 {built-in method builtins.input}
-144289/144286    0.284    0.000   16.352    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\array_algos\take.py:59(take_nd)
-   103383    0.287    0.000   16.238    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\internals\blocks.py:1353(take_nd)
-    50602    0.209    0.000   16.085    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\ops\array_ops.py:288(comparison_op)
-   144285   13.476    0.000   15.992    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\array_algos\take.py:120(_take_nd_ndarray)
-       58    0.000    0.000   15.115    0.261 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\series.py:6121(_cmp_method)
-       44   15.105    0.343   15.105    0.343 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\ops\array_ops.py:113(comp_method_OBJECT_ARRAY)
-    20459    0.029    0.000   13.763    0.001 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\groupby\ops.py:607(get_iterator)
-    24482    0.057    0.000   12.650    0.001 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:6681(copy)
-    48942    0.121    0.000   12.566    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\internals\managers.py:557(copy)
-       22    0.000    0.000   11.747    0.534 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\frame.py:5643(rename)
-       22    0.000    0.000   11.747    0.534 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:1070(_rename)
-        2    0.411    0.205   10.843    5.421 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:196(_wrap_result)
-38792/19407    0.038    0.000    9.282    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\arraylike.py:46(__lt__)
-    25294    0.019    0.000    9.206    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\arraylike.py:58(__ge__)
-    20437    0.030    0.000    8.458    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\frame.py:5440(drop)
-    20437    0.078    0.000    8.429    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:4776(drop)
+    902/1    0.015    0.000  245.822  245.822 {built-in method builtins.exec}
+      2/1    0.000    0.000  245.822  245.822 main.py:1(<module>)
+      2/1    0.023    0.011  205.732  205.732 main.py:22(main)
+      2/1    4.457    2.228  195.681  195.681 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:132(run)
+  1556105    3.828    0.000  118.855    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\frame.py:1510(iterrows)
+  1556224   12.539    0.000  106.085    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\series.py:389(__init__)
+    25/24    0.280    0.011   82.949    3.456 C:\Users\beast\AppData\Local\Programs\Python\Python312\Lib\threading.py:637(wait)
+    25/24    1.231    0.049   72.890    3.037 C:\Users\beast\AppData\Local\Programs\Python\Python312\Lib\threading.py:323(wait)
+        4    0.032    0.008   63.173   15.793 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:95(_load_data_for_day)
+        5    1.256    0.251   59.937   11.987 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:572(read_sql)
+        5    0.000    0.000   39.925    7.985 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:1791(read_query)
+  1557796    7.551    0.000   36.783    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\construction.py:517(sanitize_array)
+        1    0.001    0.001   32.925   32.925 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:28(__init__)
+        1    0.000    0.000   32.665   32.665 C:\Users\beast\Documents\Projects\IBKR_quant_platform\backtest\engine.py:79(_get_available_symbols)
+     1503    0.001    0.000   32.663    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:526(iterrows)
+     1503    0.001    0.000   32.662    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:2122(_fetchiter_impl)
+     1503    0.000    0.000   32.661    0.022 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:1099(fetchone)
+     1504   32.661    0.022   32.661    0.022 {method 'fetchone' of 'sqlite3.Cursor' objects}
+  109/102   15.594    0.143   32.193    0.316 {method 'acquire' of '_thread.lock' objects}
+  4682894    7.647    0.000   29.984    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\series.py:1104(__getitem__)
+        5    0.109    0.022   25.709    5.142 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:1319(fetchall)
+        5    9.458    1.892   25.600    5.120 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\result.py:543(_allrows)
+        4    0.001    0.000   20.152    5.038 C:\Users\beast\Documents\Projects\IBKR_quant_platform\strategies\volume_accumulation_strategy.py:33(on_new_day)
+        4    1.540    0.385   20.145    5.036 C:\Users\beast\Documents\Projects\IBKR_quant_platform\strategies\volume_accumulation_strategy.py:38(scan_for_candidates)
+        5    0.000    0.000   18.667    3.733 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:2134(_fetchall_impl)
+        5    0.910    0.182   18.667    3.733 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\sqlalchemy\engine\cursor.py:1131(fetchall)
+  1557608   10.913    0.000   18.404    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\dtypes\cast.py:1164(maybe_infer_to_datetimelike)
+        5   17.757    3.551   17.757    3.551 {method 'fetchall' of 'sqlite3.Cursor' objects}
+8225220/8151908    1.563    0.000   17.321    0.000 {built-in method builtins.getattr}
+    81776    0.034    0.000   15.884    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\indexes\extension.py:67(fget)
+    24434   13.191    0.001   15.778    0.001 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\arrays\datetimes.py:1453(date)
+68340444/68333065   11.594    0.000   14.569    0.000 {built-in method builtins.isinstance}
+        5    0.504    0.101   14.172    2.834 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:196(_wrap_result)
+  1557700    3.980    0.000   14.011    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\internals\managers.py:1863(from_array)
+  4682858    5.068    0.000   13.555    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\series.py:1229(_get_value)
+  1649597    3.225    0.000   13.334    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:6320(__setattr__)
+  1556101    1.861    0.000   11.387    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\strategies\volume_accumulation_strategy.py:99(on_bar)
+  1556101    0.940    0.000    9.415    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\strategies\base.py:66(on_bar)
+  1556231    1.495    0.000    7.843    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\_config\config.py:145(_get_option)
+        5    4.143    0.829    7.828    1.566 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:162(_convert_arrays_to_dataframe)
+  1598605    5.097    0.000    7.234    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:6255(__finalize__)
+        2    7.107    3.554    7.107    3.554 {built-in method builtins.input}
+23451419/17066385    5.211    0.000    6.983    0.000 {built-in method builtins.len}
+  1559131    3.702    0.000    6.635    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\numpy\_core\numeric.py:324(full)
+  1557713    1.684    0.000    6.607    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\generic.py:807(_set_axis)
+  1556260    1.739    0.000    6.492    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\series.py:784(name)
+  4725354    3.397    0.000    5.898    0.000 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\indexing.py:2765(check_dict_or_set_indexers)
+        5    0.006    0.001    5.840    1.168 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:141(_parse_date_columns)
+        4    0.006    0.001    5.808    1.452 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\io\sql.py:107(_handle_date_column)
+        5    0.000    0.000    5.806    1.161 C:\Users\beast\Documents\Projects\IBKR_quant_platform\venv\Lib\site-packages\pandas\core\tools\datetimes.py:678(to_datetime)
 
 

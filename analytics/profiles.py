@@ -10,11 +10,11 @@ from collections import defaultdict
 def get_session_times(session_name: str) -> tuple[time, time]:
     """Returns the start and end times for a given session name."""
     session_defs = {
-        'Pre-Market': (time(4, 0), time(9, 30)),
-        'Regular': (time(9, 30), time(16, 0)),
-        'Post-Market': (time(16, 0), time(20, 0))
+        'pre-market':  (time(4, 0),  time(9, 30)),
+        'regular':     (time(9, 30), time(16, 0)),
+        'post-market': (time(16, 0), time(20, 0)),
     }
-    return session_defs.get(session_name, (None, None))
+    return session_defs.get(session_name.lower(), (None, None))
 
 def get_session(df: pd.DataFrame, target_date: datetime.date, session_name: str, tz_str: str = 'America/New_York') -> pd.DataFrame:
     """
@@ -34,139 +34,196 @@ def get_session(df: pd.DataFrame, target_date: datetime.date, session_name: str,
 
 
 class VolumeProfiler:
-    """Calculates a Volume Profile from a DataFrame of market bars."""
-    def __init__(self, tick_size: float):
+    """
+    Calculates a Volume Profile using a fast, vectorized algorithm.
+    """
+    def __init__(self, tick_size: float, value_area_pct: float = 0.70):
         self.tick_size = tick_size
+        self.value_area_pct = value_area_pct
 
-    def calculate(self, df: pd.DataFrame) -> dict:
-        if df.empty or df['Volume'].sum() == 0:
-            return None
+    def _calculate_distribution(self, df: pd.DataFrame) -> pd.Series:
+        if df.empty or df['volume'].sum() == 0:
+            return pd.Series(dtype=float)
+        min_p = df['low'].min()
+        max_p = df['high'].max()
+        levels = np.arange(
+            np.floor(min_p / self.tick_size) * self.tick_size,
+            np.ceil(max_p  / self.tick_size) * self.tick_size,
+            self.tick_size
+        )
+        levels = np.round(levels, 8)
+        dist   = np.zeros_like(levels, dtype=float)
 
-        min_price = df['Low'].min()
-        max_price = df['High'].max()
-
-        price_levels = np.arange(min_price, max_price + self.tick_size, self.tick_size)
-
-        # --- FIX: Initialize with a float dtype to prevent performance-killing type conversions ---
-        volume_distribution = pd.Series(0.0, index=np.round(price_levels, 5))
-
-        for _, row in df.iterrows():
-            low, high, vol = row['Low'], row['High'], row['Volume']
-            if vol == 0 or high <= low: continue
-
-            # Use boolean masking for efficiency
-            relevant_levels_mask = (volume_distribution.index >= low) & (volume_distribution.index <= high)
-            num_levels = relevant_levels_mask.sum()
-
-            if num_levels > 0:
-                volume_per_level = vol / num_levels
-                volume_distribution.loc[relevant_levels_mask] += volume_per_level
-
-        if volume_distribution.sum() == 0: return None
-
-        poc_price = volume_distribution.idxmax()
-        total_volume = volume_distribution.sum()
-
-        sorted_volume = volume_distribution.sort_values(ascending=False)
-        cumulative_volume = sorted_volume.cumsum()
-        value_area_limit = total_volume * 0.7
-        value_area_prices = sorted_volume[cumulative_volume <= value_area_limit].index
-
-        vah = value_area_prices.max()
-        val = value_area_prices.min()
-
-        return {'poc_price': poc_price, 'value_area_high': vah, 'value_area_low': val}
-
-    def calculate_full_profile_for_plotting(self, df: pd.DataFrame) -> pd.Series:
-        """
-        A helper method specifically for plotting tools that need the raw
-        volume distribution Series, not just the key values.
-        """
-        if df.empty or df['Volume'].sum() == 0:
+        lows    = df['low'].to_numpy()
+        highs   = df['high'].to_numpy()
+        vols    = df['volume'].to_numpy()
+        starts  = np.searchsorted(levels, lows,  side='left')
+        ends    = np.searchsorted(levels, highs, side='right')
+        spans   = ends - starts
+        mask    = (vols > 0) & (spans > 0)
+        if not mask.any():
             return pd.Series(dtype=float)
 
-        min_price = df['Low'].min()
-        max_price = df['High'].max()
-        price_levels = np.arange(min_price, max_price + self.tick_size, self.tick_size)
-        volume_distribution = pd.Series(0.0, index=np.round(price_levels, 5))
+        vppl    = vols[mask] / spans[mask]
+        s_idx   = starts[mask]
+        e_idx   = ends[mask]
+        for i, v in enumerate(vppl):
+            dist[s_idx[i]:e_idx[i]] += v
 
-        for _, row in df.iterrows():
-            low, high, vol = row['Low'], row['High'], row['Volume']
-            if vol == 0 or high <= low: continue
+        return pd.Series(dist, index=levels)
 
-            relevant_levels_mask = (volume_distribution.index >= low) & (volume_distribution.index <= high)
-            num_levels = relevant_levels_mask.sum()
+    @staticmethod
+    def _classify_shape(vd: pd.Series, poc: float) -> str:
+        """Return 'D', 'P', 'L', 'B', or 'T' for yesterday’s profile."""
+        total = vd.sum()
+        if total == 0:
+            return "T"
 
-            if num_levels > 0:
-                volume_per_level = vol / num_levels
-                volume_distribution.loc[relevant_levels_mask] += volume_per_level
+        upper = vd[vd.index > poc].sum()
+        lower = vd[vd.index < poc].sum()
+        tail_ratio = abs(upper - lower) / total
 
-        return volume_distribution
+        if tail_ratio < 0.10:
+            return "D"
+
+        peaks = vd.sort_values(ascending=False).head(3).index
+        if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * vd.index.to_series().diff().median():
+            return "B"
+
+        return "P" if upper > lower else "L"
+
+    def calculate(self, df: pd.DataFrame) -> dict | None:
+        vd = self._calculate_distribution(df)
+        if vd.empty or vd.sum() == 0:
+            return None
+        poc = vd.idxmax()
+        tv  = vd.sum()
+        sv  = vd.sort_values(ascending=False)
+        cum = sv.cumsum()
+        va_limit = tv * self.value_area_pct
+        va_sv    = sv[cum <= va_limit]
+        if va_sv.empty:
+            va_sv = sv.head(1)
+        prices = va_sv.index
+        shape  = self._classify_shape(vd, poc)
+        return {
+            'poc_price':        poc,
+            'value_area_high':  prices.max(),
+            'value_area_low':   prices.min(), # FIXED: Added missing comma
+            'shape':            shape,
+        }
+
+    def calculate_full_profile_for_plotting(self, df: pd.DataFrame) -> pd.Series:
+        return self._calculate_distribution(df)
 
 class MarketProfiler:
-    """Calculates a comprehensive Market Profile (TPO)."""
-    def __init__(self, tick_size: float = 0.05):
-        self.tick_size = tick_size
+    """
+    Calculates a comprehensive Market Profile (TPO) using a vectorized approach.
+    """
+    def __init__(self, tick_size: float = 0.05, value_area_pct: float = 0.70):
+        self.tick_size   = tick_size
+        self.value_area_pct = value_area_pct
         self.tpo_periods = list(string.ascii_uppercase + string.ascii_lowercase)
 
-    def calculate(self, df: pd.DataFrame) -> dict:
-        if not isinstance(df.index, pd.DatetimeIndex) or df.empty:
+    @staticmethod
+    def _classify_shape(counts: pd.Series, poc: float) -> str:
+        total = counts.sum()
+        if total == 0:
+            return "T"
+        upper = counts[counts.index > poc].sum()
+        lower = counts[counts.index < poc].sum()
+        tail_ratio = abs(upper - lower) / total
+        if tail_ratio < 0.10:
+            return "D"
+        peaks = counts.sort_values(ascending=False).head(3).index
+        if len(peaks) >= 2 and abs(peaks[0] - peaks[1]) > 3 * counts.index.to_series().diff().median():
+            return "B"
+        return "P" if upper > lower else "L"
+
+    def calculate(self, df: pd.DataFrame) -> dict | None:
+        if df.empty or not isinstance(df.index, pd.DatetimeIndex):
             return None
 
-        tpo_profile = self._calculate_tpo_profile_by_interval(df)
-        if not tpo_profile:
+        tpo_series = self._calculate_tpo_profile_vectorized(df)
+
+        if tpo_series is None or tpo_series.empty:
             return None
 
-        poc, vah, val = self._calculate_poc_and_value_area(tpo_profile)
+        profile_dict = tpo_series.to_dict()
+        # FIXED: Unpack all four values, including the 'shape'
+        poc, vah, val, shape = self._calculate_poc_and_value_area(profile_dict)
 
-        return {'poc_price': poc, 'value_area_high': vah, 'value_area_low': val}
+        # FIXED: Add check to handle cases where profile calculation fails
+        if poc is None:
+            return None
 
-    def _calculate_tpo_profile_by_interval(self, df: pd.DataFrame) -> defaultdict:
-        tpo_profile = defaultdict(list)
-        session_start_time = df.index[0].floor('30min')
+        return {'poc_price': poc, 'value_area_high': vah, 'value_area_low': val, 'shape': shape}
 
-        for i, tpo_letter in enumerate(self.tpo_periods):
-            period_start = session_start_time + pd.Timedelta(minutes=30 * i)
-            period_end = period_start + pd.Timedelta(minutes=30)
-            period_bars = df[(df.index >= period_start) & (df.index < period_end)]
+    def _calculate_tpo_profile_vectorized(self, df: pd.DataFrame):
+        """Calculates the TPO profile using a vectorized approach."""
+        start_time = df.index[0].floor('30min')
+        time_deltas_seconds = (df.index - start_time).total_seconds()
+        period_indices = (time_deltas_seconds / 1800).astype(int)
 
-            if period_bars.empty:
-                if period_start > df.index[-1]: break
-                else: continue
+        period_indices = np.clip(period_indices, 0, len(self.tpo_periods) - 1)
 
-            for _, row in period_bars.iterrows():
-                start_tick = int(row['Low'] / self.tick_size)
-                end_tick = int(row['High'] / self.tick_size)
-                for tick in range(start_tick, end_tick + 1):
-                    price_level = round(tick * self.tick_size, 2)
-                    if tpo_letter not in tpo_profile[price_level]:
-                        tpo_profile[price_level].append(tpo_letter)
+        df = df.assign(tpo_letter=np.array(self.tpo_periods)[period_indices])
+
+        df = df.assign(
+            low_tick=(df['low'] / self.tick_size).astype(int),
+            high_tick=(df['high'] / self.tick_size).astype(int)
+        )
+
+        records = [
+            {'tick': tick, 'tpo': row.tpo_letter}
+            for row in df.itertuples()
+            for tick in range(row.low_tick, row.high_tick + 1)
+        ]
+
+        if not records: return None
+        exploded_df = pd.DataFrame.from_records(records)
+        tpo_profile = exploded_df.drop_duplicates().groupby('tick')['tpo'].apply(list)
+        if tpo_profile.empty: return None
+
+        tpo_profile.index = np.round(tpo_profile.index * self.tick_size, 8)
         return tpo_profile
 
-    def _calculate_poc_and_value_area(self, tpo_profile: defaultdict) -> tuple:
-        if not tpo_profile: return None, None, None
+    def _calculate_poc_and_value_area(self, profile: dict) -> tuple:
+        """Calculates POC, Value Area, and shape from a profile dictionary."""
+        # FIXED: Return tuple of four Nones for consistency
+        if not profile: return (None, None, None, None)
 
-        tpo_counts = pd.Series({price: len(tpos) for price, tpos in tpo_profile.items()})
-        poc_price = tpo_counts.idxmax()
-        total_tpos = tpo_counts.sum()
-        value_area_tpos = total_tpos * 0.7
-        current_tpos = tpo_counts.get(poc_price, 0)
-        value_area_prices = [poc_price]
-        prices_above = tpo_counts[tpo_counts.index > poc_price].index
-        prices_below = tpo_counts[tpo_counts.index < poc_price].sort_index(ascending=False).index
-        idx_above, idx_below = 0, 0
+        counts = pd.Series({p: len(v) for p, v in profile.items()})
+        poc    = counts.idxmax()
+        shape = self._classify_shape(counts, poc) # 'shape' is calculated here
 
-        while current_tpos < value_area_tpos:
-            vol_above = tpo_counts.get(prices_above[idx_above], 0) if idx_above < len(prices_above) else -1
-            vol_below = tpo_counts.get(prices_below[idx_below], 0) if idx_below < len(prices_below) else -1
-            if vol_above == -1 and vol_below == -1: break
-            if vol_above > vol_below:
-                current_tpos += vol_above
-                value_area_prices.append(prices_above[idx_above])
-                idx_above += 1
+        total  = counts.sum()
+        target = total * self.value_area_pct
+        current = counts[poc]
+        prices = [poc]
+
+        above_poc = counts.index[counts.index > poc]
+        below_poc = counts.index[counts.index < poc]
+
+        sorted_above = counts.loc[above_poc].sort_index()
+        sorted_below = counts.loc[below_poc].sort_index(ascending=False)
+
+        len_above, len_below = len(sorted_above), len(sorted_below)
+        ia, ib = 0, 0
+        while current < target and (ia < len_above or ib < len_below):
+            price_a = sorted_above.index[ia] if ia < len_above else None
+            price_b = sorted_below.index[ib] if ib < len_below else None
+
+            if price_a is not None and (price_b is None or (abs(price_a - poc) < abs(price_b - poc))):
+                current += sorted_above.iloc[ia]
+                prices.append(price_a)
+                ia += 1
+            elif price_b is not None:
+                current += sorted_below.iloc[ib]
+                prices.append(price_b)
+                ib += 1
             else:
-                current_tpos += vol_below
-                value_area_prices.append(prices_below[idx_below])
-                idx_below += 1
+                break
 
-        return poc_price, max(value_area_prices), min(value_area_prices)
+        # FIXED: Return the calculated 'shape' along with other values
+        return poc, max(prices), min(prices), shape

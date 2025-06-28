@@ -1,109 +1,117 @@
-# core/ledger.py
-
 import pandas as pd
-from core.fee_models import BaseFeeModel
+from datetime import timedelta
+from collections import deque
+import logging
+from .fee_models import BaseFeeModel
+
+engine_logger = logging.getLogger(__name__)
 
 class BacktestLedger:
     """
-    Manages all financial records for a backtest, including cash,
-    positions, and trade history. Now handles unsettled cash and exit reasons.
+    Manages all financial records for a backtest.
+    Includes T+1 settlement, slippage, and detailed trade logging.
     """
-    def __init__(self, initial_cash: float, fee_model: BaseFeeModel):
+    def __init__(self, initial_cash: float, fee_model: BaseFeeModel, slippage_model: str, slippage_pct: float):
         self.initial_cash = initial_cash
         self.cash = initial_cash
-        self.unsettled_cash = 0.0
-        self.fee_model = fee_model
+        self.buying_power = initial_cash
         self.open_positions = {}
-        self.closed_trades = []
-        self.history = [{'timestamp': None, 'equity': initial_cash}]
+        self.closed_trades = []  # This will be the official log of completed trades
+        self.equity_curve = [{'timestamp': None, 'equity': initial_cash}]
+        self.fee_model = fee_model
+        self.slippage_model = slippage_model
+        self.slippage_pct = slippage_pct
+        self.pending_settlements = deque()
 
-    def settle_funds(self):
-        """
-        Moves cash from the unsettled pool to the settled cash pool.
-        This should be called once at the start of each new trading day.
-        """
-        if self.unsettled_cash > 0:
-            self.cash += self.unsettled_cash
-            self.unsettled_cash = 0.0
+    def get_cash(self) -> float:
+        """Returns the current total settled cash amount."""
+        return self.cash
+
+    def _apply_slippage(self, price: float, trade_type: str) -> float:
+        """Applies slippage to the execution price based on the configured model."""
+        if self.slippage_model == 'percent':
+            if trade_type.upper() == 'BUY':
+                return price * (1 + self.slippage_pct)
+            elif trade_type.upper() == 'SELL':
+                return price * (1 - self.slippage_pct)
+        return price
+
+    def _update_buying_power(self, cash_change: float):
+        """Updates cash immediately. For a cash account, buying power equals settled cash."""
+        self.cash += cash_change
+        self.buying_power = self.cash
 
     def get_total_equity(self, market_prices: dict) -> float:
-        """
-        Calculates the total current value of the portfolio.
-        Equity = Settled Cash + Unsettled Cash + Value of Open Positions.
-        """
-        open_positions_value = 0
-        for symbol, position in self.open_positions.items():
-            current_price = market_prices.get(symbol, position['entry_price'])
-            open_positions_value += position['quantity'] * current_price
-        return self.cash + self.unsettled_cash + open_positions_value
+        """Calculates the total current value of the portfolio (cash + open positions)."""
+        open_positions_value = sum(
+            pos['quantity'] * market_prices.get(symbol, pos['entry_price'])
+            for symbol, pos in self.open_positions.items()
+        )
+
+        unsettled_cash = sum(amount for _, amount in self.pending_settlements)
+
+        return self.cash + open_positions_value + unsettled_cash
 
     def _update_equity(self, timestamp: pd.Timestamp, market_prices: dict):
-        """
-        Calculates and records the current portfolio equity for performance tracking.
-        """
+        """Calculates and records the current portfolio equity."""
         current_equity = self.get_total_equity(market_prices)
-        self.history.append({'timestamp': timestamp, 'equity': current_equity})
+        self.equity_curve.append({'timestamp': timestamp, 'equity': current_equity})
+
+    def settle_funds(self, current_date):
+        """
+        Checks the settlement queue and adds any settled funds to cash and buying power.
+        This should be called once at the start of each new trading day.
+        """
+        while self.pending_settlements and self.pending_settlements[0][0] <= current_date:
+            settlement_date, amount = self.pending_settlements.popleft()
+            self._update_buying_power(amount)
+            engine_logger.debug(f"[{current_date}] Settled ${amount:.2f}")
 
     def record_trade(self, timestamp: pd.Timestamp, symbol: str, quantity: int, price: float, order_type: str, market_prices: dict, exit_reason: str = None) -> bool:
-        """
-        Records a trade, updating cash and positions. Includes an optional exit_reason for sell trades.
-        Returns True if the trade was successful, False otherwise.
-        """
-        if order_type.upper() not in ['BUY', 'SELL']:
-            print(f"ERROR: Invalid order type '{order_type}'")
-            return False
-
-        fees = self.fee_model.calculate_fee(quantity, price)
+        """Records a trade, applying slippage and fees, updating cash and positions."""
+        execution_price = self._apply_slippage(price, order_type)
+        fees = self.fee_model.calculate_fee(quantity, execution_price)
 
         if order_type.upper() == 'BUY':
-            cost = (quantity * price) + fees
-            if self.cash < cost:
-                print(f"WARNING: Insufficient settled cash to buy {quantity} of {symbol}. Have {self.cash:.2f}, need {cost:.2f}. Skipping trade.")
+            cost = (quantity * execution_price) + fees
+            if self.buying_power < cost:
+                engine_logger.warning(f"[{timestamp}] Not enough buying power for BUY {symbol}. Needed: {cost:.2f}, Have: {self.buying_power:.2f}")
                 return False
-            self.cash -= cost
-            if symbol in self.open_positions:
-                old_qty = self.open_positions[symbol]['quantity']
-                old_cost = self.open_positions[symbol]['entry_price'] * old_qty
-                new_qty = old_qty + quantity
-                new_cost = old_cost + (quantity * price)
-                self.open_positions[symbol]['entry_price'] = new_cost / new_qty
-                self.open_positions[symbol]['quantity'] = new_qty
-            else:
-                self.open_positions[symbol] = { 'quantity': quantity, 'entry_price': price, 'entry_time': timestamp }
+
+            self._update_buying_power(-cost)
+            self.open_positions[symbol] = {'quantity': quantity, 'entry_price': execution_price, 'entry_time': timestamp}
 
         elif order_type.upper() == 'SELL':
-            if symbol not in self.open_positions or self.open_positions[symbol]['quantity'] < quantity:
-                print(f"WARNING: Attempting to sell {quantity} of {symbol}, but not enough held. Skipping trade.")
+            if symbol not in self.open_positions:
+                engine_logger.warning(f"[{timestamp}] Attempted to SELL {symbol} but position not found.")
                 return False
 
-            proceeds = (quantity * price) - fees
-            self.unsettled_cash += proceeds
-            position = self.open_positions[symbol]
-            pnl = (price - position['entry_price']) * quantity - fees
+            position = self.open_positions.pop(symbol) # Remove position
+            proceeds = (quantity * execution_price) - fees
+            settlement_date = timestamp.date() + timedelta(days=1) # T+1 Settlement
+            self.pending_settlements.append((settlement_date, proceeds))
 
+            pnl = (execution_price - position['entry_price']) * quantity - fees
+
+            # Append the full, closed trade details to self.closed_trades
             self.closed_trades.append({
                 'symbol': symbol, 'quantity': quantity,
-                'entry_price': position['entry_price'], 'exit_price': price,
+                'entry_price': position['entry_price'], 'exit_price': execution_price,
                 'entry_time': position['entry_time'], 'exit_time': timestamp,
-                'fees': fees, 'pnl': pnl,
-                'exit_reason': exit_reason  # Store the exit reason
+                'fees': fees, 'pnl': pnl, 'exit_reason': exit_reason
             })
-            position['quantity'] -= quantity
-            if position['quantity'] == 0:
-                del self.open_positions[symbol]
 
         self._update_equity(timestamp, market_prices)
         return True
 
     def get_equity_curve(self):
         """Returns the portfolio equity curve as a pandas DataFrame."""
-        equity_df = pd.DataFrame(self.history)
-        equity_df.dropna(subset=['timestamp'], inplace=True)
-        if not equity_df.empty:
-            equity_df['timestamp'] = pd.to_datetime(equity_df['timestamp'])
+        equity_df = pd.DataFrame(self.equity_curve)
+        if not equity_df.empty and 'timestamp' in equity_df.columns:
+            equity_df.dropna(subset=['timestamp'], inplace=True)
             equity_df.set_index('timestamp', inplace=True)
         return equity_df
 
     def get_trade_log(self):
         """Returns the list of all closed trades as a DataFrame."""
-        return pd.DataFrame(self.closed_trades)
+        return pd.DataFrame(self.closed_trades) # This now correctly returns the closed trades.
